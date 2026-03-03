@@ -27,15 +27,26 @@ uv 0.8.21 (f64da2745 2025-09-23)
 
 ```bash
 $ uv init
-$ uv add reflex python-dotenv openai google-genai
+$ uv add python-dotenv streamlit reflex
+$ uv add openai google-genai
 $ uv add langchain langgraph langsmith
 $ uv add --group dev ipykernel
 ```
 
-### run
-
-- startup reflex service
+- add api keys environments
 
 ```bash
-$ uv run reflex
+$ cat .env
+OPENAI_API_KEY="..."
+GEMINI_API_KEY="..."
+```
+
+### run
+
+- startup streamlit app
+
+```bash
+$ uv sync
+$ uv run streamlit run main.py
+$ curl localhost:8501
 ```
