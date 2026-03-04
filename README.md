@@ -38,6 +38,7 @@ $ uv add --group dev ipykernel
 ```bash
 $ cat .env
 OPENAI_API_KEY="..."
+OPENAI_VECTOR_STORE_ID="..."
 GEMINI_API_KEY="..."
 ```
 
