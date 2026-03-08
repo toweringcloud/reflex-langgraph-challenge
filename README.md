@@ -27,7 +27,7 @@ uv 0.8.21 (f64da2745 2025-09-23)
 
 ```bash
 $ uv init
-$ uv add python-dotenv streamlit reflex
+$ uv add python-dotenv requests streamlit reflex
 $ uv add openai google-genai
 $ uv add langchain langgraph langsmith
 $ uv add --group dev ipykernel
