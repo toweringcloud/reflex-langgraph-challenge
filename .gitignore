@@ -208,6 +208,6 @@ __marimo__/
 
 # Additional
 *.db
-*.txt
 *.log
-challenges*
+.streamlit
+challenges.*

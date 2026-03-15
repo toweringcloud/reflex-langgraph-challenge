@@ -1,4 +1,5 @@
 import asyncio
+import os
 
 import dotenv
 import streamlit as st
@@ -15,13 +16,21 @@ from restaurant_agents.models import UserContext
 
 dotenv.load_dotenv()
 
+# 1. Streamlit Secrets에서 먼저 찾고, 없으면 환경변수에서 찾음
+openai_api_key = st.secrets.get("OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY")
 
-client = OpenAI()
+if not openai_api_key:
+    st.error("OpenAI API Key가 설정되지 않았습니다. Secrets 설정을 확인해주세요.")
+    st.stop()
+
+# 클라이언트 초기화 시 키 전달
+client = OpenAI(api_key=openai_api_key)
+# client = OpenAI()
 
 
 user_context = UserContext(
     customer_id=1,
-    name="tommy",
+    name="홍길동",
     mobile="010-1234-5678",
     tier="gold",
 )
