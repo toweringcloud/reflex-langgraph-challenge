@@ -2,10 +2,16 @@ import asyncio
 
 import dotenv
 import streamlit as st
-from agents import Runner, SQLiteSession
+from agents import (
+    InputGuardrailTripwireTriggered, 
+    OutputGuardrailTripwireTriggered,
+    Runner, 
+    SQLiteSession, 
+)
 from openai import OpenAI
+
+from restaurant_agents.factory import triage_agent
 from restaurant_agents.models import UserContext
-from restaurant_agents.triage_agent import triage_agent
 
 dotenv.load_dotenv()
 
@@ -19,7 +25,6 @@ user_context = UserContext(
     mobile="010-1234-5678",
     tier="gold",
 )
-
 
 if "session" not in st.session_state:
     st.session_state["session"] = SQLiteSession(
@@ -38,7 +43,7 @@ async def paint_history():
         if "role" in message:
             with st.chat_message(message["role"]):
                 if message["role"] == "user":
-                    st.write(f"User: {message['content']}")
+                    st.write(message['content'])
                 else:
                     if message["type"] == "message":
                         if message["content"][0]["text"]:
@@ -51,45 +56,64 @@ asyncio.run(paint_history())
 
 async def run_agent(message):
     with st.chat_message("ai"):
+        # 초기 에이전트 이름 표시를 위한 placeholder
+        header_placeholder = st.empty()
         text_placeholder = st.empty()
         response = ""
 
+        # 현재 에이전트 표시
+        current_agent = st.session_state["agent"]
+        header_placeholder.markdown(f"**🤖 {current_agent.name}**")
         st.session_state["text_placeholder"] = text_placeholder
 
-        stream = Runner.run_streamed(
-            st.session_state["agent"],
-            message,
-            session=session,
-            context=user_context,
-        )
+        try:
+            stream = Runner.run_streamed(
+                st.session_state["agent"],
+                message,
+                session=session,
+                context=user_context,
+            )
 
-        async for event in stream.stream_events():
-            if event.type == "raw_response_event":
-                if event.data.type == "response.output_text.delta":
-                    response += event.data.delta
-                    text_placeholder.write(response)
+            async for event in stream.stream_events():
+                if event.type == "raw_response_event":
+                    if event.data.type == "response.output_text.delta":
+                        response += event.data.delta
+                        text_placeholder.write(response)
 
-            elif event.type == "agent_updated_stream_event":
-                if st.session_state["agent"].name != event.new_agent.name:
-                    st.write(f"[🤖 {event.new_agent.name}로 handoff]")
-                    st.session_state["agent"] = event.new_agent
-                    text_placeholder = st.empty()
-                    st.session_state["text_placeholder"] = text_placeholder
-                    response = ""
+                elif event.type == "agent_updated_stream_event":
+                    new_agent = event.new_agent
+                    if st.session_state["agent"].name != event.new_agent.name:
+                        # 1. 이전 에이전트의 최종 답변 확정
+                        text_placeholder.write(response)
 
+                        # 2. Handoff 구분선 및 알림
+                        st.markdown(
+                            f"--- \n> 🔄 **{new_agent.name}**에게 업무를 인계합니다..."
+                        )
 
-message = st.chat_input(
-    "Write a message for your assistant",
-)
+                        # 3. 세션 상태 업데이트 및 새 UI 준비
+                        st.session_state["agent"] = new_agent
+                        response = ""
+                        text_placeholder = st.empty()
+                        st.session_state["text_placeholder"] = text_placeholder
+
+        except InputGuardrailTripwireTriggered:
+            st.write("I can't help you with that.")
+
+        except OutputGuardrailTripwireTriggered:
+            st.write("I can't show you that answer.")
+            st.session_state["text_placeholder"].empty()
+
+message = st.chat_input("Write a message for your assistant")
 
 if message:
     with st.chat_message("human"):
-        st.write(f"User: {message}")
+        st.write(message)
     asyncio.run(run_agent(message))
 
 
 with st.sidebar:
-    st.write("## Restaurant Management Agent")
+    st.write("## Restaurant Manager Agent")
     reset = st.button("Reset memory")
     if reset:
         asyncio.run(session.clear_session())
