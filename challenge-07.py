@@ -113,7 +113,14 @@ async def run_agent(message):
             st.write("I can't show you that answer.")
             st.session_state["text_placeholder"].empty()
 
-message = st.chat_input("Write a message for your assistant")
+
+st.set_page_config(
+    page_title="::: 이탈리안 레스토랑 :::",
+    page_icon="🍕",
+)
+st.title("🍕 이탈리안 레스토랑")
+
+message = st.chat_input("안녕하세요 이탈리안 레스토랑 입니다. 메뉴/주문/예약 관련하여 문의해 주세요. 예시: '오늘의 스페셜 메뉴가 뭐야?', '저녁 7시에 4명 예약할 수 있을까?', '마르게리따 피자 주문하고 싶어'")
 
 if message:
     with st.chat_message("human"):
@@ -122,7 +129,7 @@ if message:
 
 
 with st.sidebar:
-    st.write("## Restaurant Manager Agent")
+    st.write("## Agent Session History")
     reset = st.button("Reset memory")
     if reset:
         asyncio.run(session.clear_session())

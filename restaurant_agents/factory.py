@@ -93,10 +93,11 @@ def make_handoff(agent, description=None):
         on_handoff=handle_handoff,
         input_type=HandoffData,
         input_filter=handoff_filters.remove_all_tools,
-        tool_description_override=f"""
-            Transfer to {agent.name} ONLY IF the user explicitly asks about {description}. 
-            DO NOT use if the conversation is just general greeting or finishing up.
-        """,
+        # '오직'과 '일치할 때만'을 강조하여 무분별한 토스를 방지
+        tool_description_override=(
+            f"사용자의 요청이 **오직** '{description}'와(과) 명확히 일치할 때만 호출하세요. "
+            f"모호하거나 단순한 인사, 확인 질문에는 절대로 이 도구를 사용하지 말고 직접 응답하세요."
+        ),
     )
 
 
