@@ -211,3 +211,4 @@ __marimo__/
 *.log
 .streamlit
 challenges.*
+.adk

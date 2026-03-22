@@ -28,7 +28,7 @@ uv 0.8.21 (f64da2745 2025-09-23)
 ```bash
 $ uv init
 $ uv add python-dotenv requests streamlit reflex
-$ uv add openai google-genai
+$ uv add openai litellm google-adk google-genai
 $ uv add langchain langgraph langsmith
 $ uv add --group dev ipykernel
 ```
@@ -42,7 +42,7 @@ OPENAI_VECTOR_STORE_ID="..."
 GEMINI_API_KEY="..."
 ```
 
-### run
+### run app
 
 - startup streamlit app
 
@@ -50,4 +50,12 @@ GEMINI_API_KEY="..."
 $ uv sync
 $ uv run streamlit run main.py
 $ curl localhost:8501
+```
+
+- startup adk app
+
+```bash
+$ uv sync
+$ uv run adk web
+$ curl localhost:8000
 ```

@@ -1,7 +1,7 @@
 from agents import Agent, RunContextWrapper
 from agents.extensions.handoff_prompt import RECOMMENDED_PROMPT_PREFIX
 
-from restaurant_agents.models import UserContext
+from .models import UserContext
 
 
 def get_triage_instructions(
