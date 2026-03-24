@@ -210,5 +210,6 @@ __marimo__/
 *.db
 *.log
 .streamlit
-challenges.*
 .adk
+challenges.*
+solutions.md
