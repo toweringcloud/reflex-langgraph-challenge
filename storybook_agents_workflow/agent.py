@@ -61,7 +61,7 @@ def on_story_start(callback_context: CallbackContext) -> Optional[types.Content]
 
 def on_story_done(callback_context: CallbackContext) -> Optional[types.Content]:
     story = callback_context.state.to_dict().get("story_output", {})
-    title = story.get("title", "Untitled")
+    title = story.get("theme", "Untitled")
     print(f"✅ Story written: {title}")
     return None
 
