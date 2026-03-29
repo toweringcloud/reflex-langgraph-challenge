@@ -1,48 +1,114 @@
-# 🌍 Geo Master Agent 설계도 (v2.0)
+# 🌍 Geo Master Agent v2.1
+
+LangGraph와 Google GenAI SDK를 활용하여 특정 국가의 분야별 핵심 히스토리를 분석하고, 이를 바탕으로 한글 텍스트가 포함된 고품질 교육용 웹툰/삽화를 자동 생성하는 AI 에이전트입니다.
 
 ## 1. 에이전트 개요
 
-- **이름**: 지오 마스터 에이전트
-- **목적**: 국가 간 주요 지정학적 이슈를 분석하고, 사용자가 선택한 사건을 타임라인 카툰으로 시각화하여 제공
+- **이름**: 지오 마스터 에이전트 (Geo Master Agent)
+- **목적**: 국가 간의 다양한 교류/협력 히스토리를 분석하고, 사용자가 선택한 이슈를 학습용 카툰 이미지로 시각화
 - **핵심 기능**:
-  - **지정학 이슈 검색 & Top 10 필터링**: Tavily 검색 도구와 LLM을 결합하여 가장 중요한 이슈 10개를 자동 선별
-  - **Human-in-the-loop (HITL)**: 검색된 리스트 중 사용자가 원하는 이슈를 직접 선택할 때까지 실행을 중단하고 대기
-  - **병렬 카툰 이미지 생성**: 사용자가 선택한 여러 이슈에 대해 DALL-E 3 API를 병렬로 호출하여 생성 속도 극대화
-  - **대화형 메모리**: `SqliteSaver`를 통해 사용자의 이전 검색 국가 및 선택 이력을 유지
+  - **스마트 국가 인식**: `pycountry`와 한국어 통칭(Alias) 맵핑을 통해 전 세계 국가명을 정확히 인식하고, 검색 품질 극대화를 위해 공식 영문 명칭으로 내부 변환
+  - **이슈 히스토리 검색 & Top-N 필터링**: `Tavily` 검색 도구와 LLM을 결합하여 가장 중요한 이슈 N개를 자동 선별
+  - **도메인 맞춤형 검색**: 경제, 문화, 교육, 과학, 방산 등 5가지 주요 도메인에 특화된 프롬프트로 깊이 있는 역사/이슈 검색
+  - **대화형 메모리**: `MemorySaver`를 사용하여 LangGraph 워크플로우의 상태를 인메모리에 저장하며, Human-in-the-loop(HITL) 단계에서 워크플로우의 안전한 일시 정지(Interrupt) 및 사용자 개입 후 재개(Resume)를 완벽하게 제어
+  - **Human-in-the-loop (HITL)**: LangGraph의 `interrupt` 기능을 활용하여 사용자가 직접 시각화할 이슈를 선택하고 검수할 수 있는 상호작용형 워크플로우
+  - **병렬 이미지 생성**: 선택된 여러 개의 이슈를 Map-Reduce 패턴(Send API)을 통해 병렬로 빠르게 생성
+  - **완벽한 한글 타이포그래피**: `gemini-3.1-flash-image-preview` 모델의 멀티모달 능력을 활용하여 깨짐 없는 선명한 한글 텍스트 렌더링 지원
 
 ---
 
 ## 2. 그래프 구조
 
-### 📋 State (상태 변수)
+### 📋 States (상태 변수)
 
 | 필드명             | 타입         | 설명                                              |
 | :----------------- | :----------- | :------------------------------------------------ |
+| `domain`           | `str`        | 유저가 선택한 분석 대상 도메인 (경제, 문화 등)    |
 | `country`          | `str`        | 유저가 입력한 대상 국가                           |
-| `years`            | `int`        | 분석 대상 기간 (최근 1년 ~ 100년)                 |
-| `issue_list`       | `List[str]`  | LLM이 정제하여 반환한 Top 10 이슈 리스트          |
+| `years`            | `int`        | 분석 대상 기간 (최근 1년 ~ 10000년)               |
+| `issue_list`       | `List[str]`  | LLM이 정제하여 반환한 Top 5 이슈 리스트           |
 | `selected_indices` | `List[int]`  | 사용자가 선택한 이슈의 인덱스 번호 (HITL 입력값)  |
 | `final_images`     | `List[dict]` | 병렬 노드에서 생성된 이미지 데이터 및 설명의 집합 |
 
 ### 🛠️ Nodes (작업 단위)
 
-1. **`search_issues`**: `tools.get_refined_issues`를 호출하여 웹 검색 및 LLM 필터링 수행
-2. **`wait_for_selection`**: `interrupt` 함수를 통해 그래프 실행을 일시 중지하고 사용자 입력 대기
+1. **`history_search`**: `tools.get_refined_issues`를 호출하여 웹 검색 및 LLM 필터링 수행
+2. **`user_approval`**: `interrupt` 함수를 통해 그래프 실행을 일시 중지하고 사용자 입력 대기
 3. **`parallel_trigger`**: 사용자가 선택한 인덱스만큼 `Send` 객체를 생성하여 병렬 노드 호출
-4. **`create_cartoon_image`**: 개별 이슈에 대해 DALL-E 3 이미지를 생성하고 결과를 `final_images`에 추가
+4. **`cartoon_generation`**: 개별 이슈에 대해 DALL-E 3 이미지를 생성하고 결과를 `final_images`에 추가
 
 ### 🔄 Edges (흐름 제어)
 
-- **기본 흐름**: `START` → `search_issues` → `wait_for_selection`
-- **조건부 병렬 실행**: `wait_for_selection` → (사용자 입력 수신) → `parallel_trigger` → `create_cartoon_image (Parallel)` → `END`
+- **기본 흐름**: `START` → `history_search` → `user_approval`
+- **조건부 병렬 실행**: `user_approval` → (사용자 입력 수신) → `parallel_trigger` → `cartoon_generation (Parallel)` → `END`
 
 ---
 
 ## 3. 시스템 아키텍처
 
-- **에이전트 레이어 (LangGraph)**: 워크플로우의 상태 관리 및 Human-in-the-loop (HITL) 로직 담당
-- **도구 레이어 (Tools)**: `TavilySearch`, `ChatOpenAI`, `DALL-E 3` 등 외부 API 연동 및 데이터 처리 담당
-- **인터페이스 레이어**: 터미널(`input()`) 기반으로 타겟을 입력 받고, 중간 결과 중에 1개 이상 선택하면 최종 결과 처리 담당
+아래 다이어그램은 유저의 터미널 입력부터 최종 이미지 파일이 로컬에 저장되기까지의 전체 데이터 파이프라인과 3계층(Interface, Tools, Agent) 아키텍처를 보여줍니다.
+
+```mermaid
+flowchart TB
+    %% 스타일 정의
+    classDef interface fill:#e3f2fd,stroke:#1e88e5,stroke-width:2px,color:#0d47a1
+    classDef agent fill:#f3e5f5,stroke:#8e24aa,stroke-width:2px,color:#4a148c
+    classDef tools fill:#e8f5e9,stroke:#43a047,stroke-width:2px,color:#1b5e20
+    classDef storage fill:#fff3e0,stroke:#f4511e,stroke-width:2px,color:#e65100
+
+    subgraph Interface ["🖥️ 인터페이스 레이어 (Terminal)"]
+        direction TB
+        UI1(["초기 입력 (도메인/국가/기간)"])
+        UI2(["검색된 Top N 이슈 확인"])
+        UI3(["HITL (이미지 생성할 번호 선택)"])
+        UI4(["최종 결과 (이미지 경로) 확인"])
+    end
+
+    subgraph Agent ["🧠 에이전트 레이어 (LangGraph)"]
+        direction TB
+        State[("AgentState\n(상태 및 메모리 관리)")]
+        N1["history_search_node\n(검색 및 정제)"]
+        N2["approve_by_human_node\n(사용자 입력 대기/검증)"]
+        N3["trigger_parallel_node\n(Send API 분기)"]
+        N4["create_cartoon_image_node\n(병렬 이미지 생성)"]
+
+        State -.- N1 & N2 & N3 & N4
+        N1 -->|이슈 리스트 전달| N2
+        N2 -->|유효한 인덱스 전달| N3
+        N3 == "Map-Reduce (병렬 처리)" ==> N4
+    end
+
+    subgraph Tools ["🛠️ 도구 레이어 (APIs & Storage)"]
+        direction TB
+        T1["Tavily Search API\n(데이터 수집)"]
+        T2["LLM (ChatOpenAI)\n(이슈 요약/정제)"]
+        T3["Google GenAI API\n(Gemini 3.1 Flash Image)"]
+        FS[("Local File System\n(/downloads 폴더)")]
+    end
+
+    %% 레이어 간 상호작용 흐름
+    UI1 --> N1
+    N1 <--> T1
+    N1 <--> T2
+    N1 --> UI2
+    UI2 -. "사용자 개입 (Interrupt)" .-> UI3
+    UI3 --> N2
+    N4 <--> T3
+    T3 --> FS
+    FS --> UI4
+
+    %% 클래스 적용
+    class Interface interface
+    class Agent agent
+    class Tools tools
+    class FS storage
+```
+
+### 💡 다이어그램이 보여주는 핵심 구조
+
+- **인터페이스 (파란색)**: 사용자가 에이전트와 대화하는 터미널 I/O의 흐름입니다.
+- **에이전트 (보라색)**: LangGraph가 상태(`AgentState`)를 관리하며, 단일 노드 실행에서 병렬 실행(`Map-Reduce`)으로 뻗어나가는 워크플로우를 보여줍니다.
+- **도구 (초록/주황색)**: 에이전트가 호출하는 외부 API들과 최종 결과물이 안착하는 로컬 저장소의 역할을 명시했습니다.
 
 ---
 
@@ -50,7 +116,8 @@
 
 - **성과**: 단일 프롬프트의 한계를 벗어나 검색-검증-선택-생성의 다단계 에이전트 협업 시스템 구축
 - **배운 점**: 상상 속의 아이디어를 AI 에이전트들이 협력하는 생산적인 시스템으로 구현하는 경험 확보
-- **사용성 개선**: `Streamlit` 앱에서 시작하여 최종적으로 `Reflex` 프레임워크 기반의 풀스택 앱으로 확장
+- **챗봇 메시징**: 향후 `Streamlit` 웹 서비스 기반으로 사용자별 대화 맥락 유지를 위한 DB 서버 연계 예정
+- **UI 사용성 개선**: 보다 인터랙티브한 UI 서비스 제공을 위해 최종적으로 `Reflex` 프레임워크 기반의 풀스택 앱으로 확장
 
 ---
 
@@ -74,9 +141,10 @@
 - **Send API 활용**: 사용자가 선택한 여러 이슈에 대해 이미지를 생성할 때, 순차 실행이 아닌 **병렬(Parallel) 실행**을 통해 응답 대기 시간을 획기적으로 줄였습니다.
 - **결과 확인**: 생성된 이미지는 Base64 데이터로 수집되며, 로컬 환경 실행 시 `image_{hash}.png` 형태로 자동 저장되어 실시간으로 결과물을 확인할 수 있습니다.
 
-### 4. 메모리 및 상태 유지
+### 4. 메모리 및 상태 관리
 
-- **Checkpointer 연동**: `SqliteSaver`를 통해 `thread_id`별로 상태를 저장합니다. 이를 통해 사용자가 이슈를 선택하는 동안 프로그램이 잠시 멈춰도(HITL), 재시작 시 이전 검색 결과를 그대로 유지합니다.
+- **Checkpointer 연동**: `MemorySaver`를 사용하여 LangGraph 워크플로우의 상태를 인메모리에 저장하며, Human-in-the-loop(HITL) 단계에서 워크플로우의 안전한 일시 정지(Interrupt) 및 사용자 개입 후 재개(Resume)를 완벽하게 제어합니다.
+- 향후 Streamlit 웹 서비스 연동 시, 사용자별 대화 맥락 유지를 위한 영구 DB Checkpointer로 확장 예정입니다.
 
 ### 5. 라이브러리 최신화 및 데이터 규격 대응
 
@@ -98,3 +166,20 @@
   - **한글 텍스트 지원**: 이미지 내 한글 텍스트를 깨짐 없이 정확하게 렌더링.
   - **고화질 생성**: 교육용 콘텐츠에 적합한 깔끔하고 세련된 화풍 제공.
   - **속도 최적화**: Flash 기반 모델의 빠른 생성 속도로 사용자 대기 시간 단축.
+
+### 8. API 캐싱 및 비용 최적화 (SQLite Cache)
+
+- **현상**: 개발 및 테스트 과정에서 동일한 조건(국가, 기간, 도메인)으로 반복 검색 시, Tavily API 호출 크레딧이 불필요하게 소모되고 검색 대기 시간(3~5초)이 지속적으로 발생함.
+- **해결**: 파이썬 내장 `sqlite3`를 활용하여 로컬 데이터베이스(`search_cache.db`)에 검색 결과를 저장하는 캐싱(Caching) 시스템 도입.
+- **작동 방식**: 사용자의 입력값(`국가_기간_도메인`)을 고유한 캐시 키(Cache Key)로 생성. 일치하는 키가 DB에 존재하면 API 호출을 건너뛰고 캐시된 JSON 데이터를 즉시 반환(Cache Hit).
+- **효과**: 중복 검색 시 응답 속도를 0.1초 이내로 획기적으로 단축하고 API 비용 과금을 원천 차단.
+- **예외/초기화 처리**: 과거의 캐시 데이터가 아닌 **가장 최신의 실시간 검색 결과**를 다시 불러오고 싶다면, 프로젝트 루트 경로에 자동 생성된 `search_cache.db` 파일을 삭제한 후 에이전트를 재실행하면 됨.
+
+### 9. 다국어 및 국가명 입력 예외 처리 (Global Country Mapping)
+
+- **현상 (제약 조건)**: 사용자가 국가명을 한글(미국), 영문(United States), 약어(US, UK), ISO 코드(USA, KR) 등 일관성 없는 포맷으로 입력하거나 오타를 발생시킬 경우, 검색 엔진과 LLM의 인식률이 떨어져 엉뚱한 결과가 나오거나 에러가 발생할 위험이 있음.
+- **해결 및 예외 처리**:
+  - `pycountry` 라이브러리와 사용자 지정 통칭(Alias) 데이터를 결합하여 **다국어/코드 통합 맵핑 딕셔너리**를 선제적으로 구축.
+  - 사용자의 모든 입력값을 대소문자 구분 없이 소문자로 변환(`.lower()`)하여 맵핑 딕셔너리와 대조하는 검증 로직 적용.
+  - **데이터 표준화**: 유효한 입력으로 판별되면, 검색 정확도를 극대화하기 위해 에이전트 내부 상태(`State`)에는 반드시 **공식 영문 명칭(예: `Korea, Republic of`)**으로 변환하여 저장.
+  - **안전한 루프(Fallback)**: 딕셔너리에 존재하지 않는 완전히 잘못된 값이나 오타가 입력될 경우, 에이전트가 다운(Crash)되지 않고 `while True` 루프를 통해 경고 메시지("❌ 등록되지 않거나 잘못된 국가명입니다")를 출력한 뒤 재입력을 유도하도록 견고하게 설계됨.
