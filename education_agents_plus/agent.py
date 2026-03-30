@@ -17,9 +17,9 @@ from tools import (
 # 1. State 정의
 class AgentState(TypedDict):
     domain: str  # 예: "economy", "culture", "education", "science", "military"
-    country: str  # 예: "한국", "미국", "영국", "이라크", "이집트", "인도", "중국", "투르크메티스탄", "멕시코", "페루"
-    years: int  # 예: 1~10000 사이의 정수 (고대 문명 시대도 포함)
-    issue_list: List[str]  # 검색된 이슈 목록
+    country: str  # 예: "한국", "kr", "south korea" -> "Korea, Republic of" (도구에서 영어 공식 명칭으로 치환)
+    years: int  # 예: 1~100 사이의 정수 (고대 문명 시대도 포함하면 좋겠으나 검색 가능 데이터를 고려해서 100년 정도로 제한)
+    issue_list: List[str]  # 검색된 이슈 목록 Top N (예: 5개)
     selected_indices: List[int]  # 사용자가 선택한 번호들 (HITL 입력값)
     final_images: Annotated[List[dict], operator.add]  # 병렬 실행 결과 취합
 
@@ -209,16 +209,16 @@ async def run_geo_agent():
                 "❌ 등록되지 않거나 잘못된 국가명입니다. 정확한 국가명을 입력해 주세요."
             )
 
-    # 4. 입력 조건 중에 기간 (1~10000) 검증 ---
+    # 4. 입력 조건 중에 기간 (1~100) 검증 ---
     while True:
         try:
             target_years = int(
-                input("\n👉 몇 년 전까지의 히스토리를 볼까요? (1~10000): ").strip()
+                input("\n👉 몇 년 전까지의 히스토리를 볼까요? (1~100): ").strip()
             )
-            if 1 <= target_years <= 10000:
+            if 1 <= target_years <= 100:
                 break
             else:
-                print("❌ 범위를 벗어났습니다. 1에서 10000 사이의 숫자를 입력해주세요.")
+                print("❌ 범위를 벗어났습니다. 1에서 100 사이의 숫자를 입력해주세요.")
         except ValueError:
             print("❌ 숫자로만 입력해주세요.")
 

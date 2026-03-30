@@ -1,4 +1,4 @@
-# 🌍 Geo Master Agent v2.1
+# 🌍 Geo Master Agent v3.0
 
 LangGraph와 Google GenAI SDK를 활용하여 특정 국가의 분야별 핵심 히스토리를 분석하고, 이를 바탕으로 한글 텍스트가 포함된 고품질 교육용 웹툰/삽화를 자동 생성하는 AI 에이전트입니다.
 
@@ -25,7 +25,7 @@ LangGraph와 Google GenAI SDK를 활용하여 특정 국가의 분야별 핵심 
 | :----------------- | :----------- | :------------------------------------------------ |
 | `domain`           | `str`        | 유저가 선택한 분석 대상 도메인 (경제, 문화 등)    |
 | `country`          | `str`        | 유저가 입력한 대상 국가                           |
-| `years`            | `int`        | 분석 대상 기간 (최근 1년 ~ 10000년)               |
+| `years`            | `int`        | 분석 대상 기간 (최근 1년 ~ 100년)                 |
 | `issue_list`       | `List[str]`  | LLM이 정제하여 반환한 Top 5 이슈 리스트           |
 | `selected_indices` | `List[int]`  | 사용자가 선택한 이슈의 인덱스 번호 (HITL 입력값)  |
 | `final_images`     | `List[dict]` | 병렬 노드에서 생성된 이미지 데이터 및 설명의 집합 |
@@ -112,7 +112,24 @@ flowchart TB
 
 ---
 
-## 4. 회고 및 향후 로드맵
+## 4. 서비스 실행
+
+### Streamlit App Start
+
+```bash
+uv run streamlit run main.app
+```
+
+### Cloudflare API Token Test
+
+```bash
+curl "https://api.cloudflare.com/client/v4/accounts/b5604a8e6522c3b88f4df3ff1771e0ff/tokens/verify" \
+-H "Authorization: Bearer {your_api_token_for_kv_and_d1 or your_api_token_for_r2}"
+```
+
+---
+
+## 5. 회고 및 향후 로드맵
 
 - **성과**: 단일 프롬프트의 한계를 벗어나 검색-검증-선택-생성의 다단계 에이전트 협업 시스템 구축
 - **배운 점**: 상상 속의 아이디어를 AI 에이전트들이 협력하는 생산적인 시스템으로 구현하는 경험 확보
