@@ -131,6 +131,7 @@ def create_cartoon_image_node(state: ImageTaskState, config: RunnableConfig):
                     "status": "success",
                     "file": cached_data["image_url"],  # 저장된 URL 꺼내기
                     "issue": issue_text,
+                    "is_cached": True,  # 👈 캐시 적중 플래그 추가!
                 }
             ]
         }
@@ -160,6 +161,7 @@ def create_cartoon_image_node(state: ImageTaskState, config: RunnableConfig):
                     "status": "success",
                     "file": new_url,
                     "issue": issue_text,
+                    "is_cached": False,  # 👈 신규 생성 플래그 추가!
                 }
             ]
         }

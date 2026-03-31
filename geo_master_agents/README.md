@@ -1,4 +1,4 @@
-# 🌍 Geo Master Agent v3.1
+# 🌍 Geo Master Agent v3.2
 
 LangGraph와 Google GenAI SDK를 활용하여 특정 국가의 분야별 핵심 히스토리를 분석하고, 이를 바탕으로 한글 텍스트가 포함된 고품질 교육용 웹툰/삽화를 자동 생성하는 AI 에이전트입니다.
 
@@ -56,15 +56,15 @@ flowchart TB
     classDef serverless fill:#fff3e0,stroke:#f4511e,stroke-width:2px,color:#e65100
     classDef tools fill:#e8f5e9,stroke:#43a047,stroke-width:2px,color:#1b5e20
 
-    subgraph Interface ["🖥️ 프론트엔드 레이어 (Streamlit)"]
+    subgraph Interface ["🟦 프론트엔드 레이어 (Streamlit)"]
         direction TB
         UI1(["초기 설정 입력<br/>(분야/국가/기간)"])
-        UI2(["이슈 리스트 렌더링<br/>(D1 Cache 조회)"])
+        UI2(["이슈 리스트 렌더링<br/>(KV Cache 조회)"])
         UI3(["HITL 사용자 선택<br/>(체크박스 인덱스)"])
         UI4(["최종 웹툰 전시<br/>(R2 Public URL)"])
     end
 
-    subgraph Agent ["🧠 에이전트 레이어 (LangGraph)"]
+    subgraph Agent ["🟪 에이전트 레이어 (LangGraph)"]
         direction TB
         Saver[("Cloudflare D1 Saver<br/>(Thread 상태 영구 저장)")]
         N1["search_historical_issues_node<br/>(KV 기반 캐시 검색)"]
@@ -78,14 +78,14 @@ flowchart TB
         N3 == "Map-Reduce (병렬)" ==> N4
     end
 
-    subgraph Serverless ["☁️ 서버리스 레이어 (Cloudflare)"]
+    subgraph Serverless ["🟧 서버리스 레이어 (Cloudflare)"]
         direction TB
         D1[("D1 SQL DB<br/>(Checkpointer & History)")]
         KV[("Workers KV<br/>(Search & Image Cache)")]
         R2[("R2 Object Storage<br/>(웹툰 이미지 저장소)")]
     end
 
-    subgraph Tools ["🛠️ 외부 API"]
+    subgraph Tools ["🟩 외부 API 및 도구"]
         direction TB
         Tavily["Tavily Search API<br/>(데이터 수집)"]
         GPT["GPT 4o Mini<br/>(수집 결과 분석 및 추천)"]
@@ -115,11 +115,38 @@ flowchart TB
     class Tools tools
 ```
 
-### 💡 다이어그램이 보여주는 핵심 구조
+### 💡 시스템 아키텍처 레이어별 상세 설명
 
-- **인터페이스 (파란색)**: 사용자가 에이전트와 대화하는 터미널 I/O의 흐름입니다.
-- **에이전트 (보라색)**: LangGraph가 상태(`AgentState`)를 관리하며, 단일 노드 실행에서 병렬 실행(`Map-Reduce`)으로 뻗어나가는 워크플로우를 보여줍니다.
-- **도구 (초록/주황색)**: 에이전트가 호출하는 외부 API들과 최종 결과물이 안착하는 로컬 저장소의 역할을 명시했습니다.
+#### 🟦 **프론트엔드 레이어 (Streamlit & Chat Interface)**
+
+- **역할**: 사용자 인터랙션 관리 및 실시간 에이전트 상태 시각화.
+- **핵심 기능**:
+  - **Chat UI**: `st.chat_message`와 `st.chat_input`을 통해 자연어 기반의 검색 요청을 수신하고 대화형 피드백을 제공합니다.
+  - **HITL(Human-in-the-Loop)**: LangGraph의 `interrupt`에 의한 대기 상태를 체크박스 UI로 시각화하여 사용자가 최종 이슈를 선택하도록 유도합니다.
+  - **멀티모달 렌더링**: 생성 완료 시 **R2 Public URL**을 호출하여 고해상도 웹툰 이미지를 브라우저에 즉시 출력합니다.
+
+#### 🟪 **에이전트 레이어 (LangGraph)**
+
+- **역할**: 상태 관리(`AgentState`) 기반의 지능형 워크플로우 오케스트레이션.
+- **핵심 기능**:
+  - **D1 Checkpointer**: `Cloudflare D1 Saver`를 통해 에이전트의 모든 상태를 영구 저장합니다. 이를 통해 브라우저 새로고침이나 세션 종료 후에도 중단된 지점(Checkpoint)부터 즉시 재개(Resume)가 가능합니다.
+  - **Map-Reduce (병렬 처리)**: 사용자가 선택한 다수의 이슈를 병렬 노드(`cartoon_generation`)로 분기 처리하여, 대기 시간을 단축하고 생성 효율을 극대화합니다.
+
+#### 🟧 **서버리스 레이어 (Cloudflare Cloud Native)**
+
+- **역할**: 초저지연 캐싱 및 영구 데이터 저장소 관리.
+- **핵심 기능**:
+  - **Workers KV**: 전 세계 엣지 노드에 검색 결과 및 생성된 이미지 경로를 캐싱합니다. 동일 조건 요청 시 외부 API 호출 없이 **0.1초 내 초저지연 응답**을 보장합니다.
+  - **D1 SQL**: 서버리스 관계형 DB로 에이전트의 대화 세션, 유저 설정, 체크포인트 데이터를 안전하게 관리합니다.
+  - **R2 Storage**: 생성된 이미지를 호스팅하는 S3 호환 객체 저장소로, 높은 가용성과 전용 Public URL을 통해 이미지를 제공합니다.
+
+#### 🟩 **외부 API 및 도구 레이어**
+
+- **역할**: 실시간 데이터 수집 및 멀티모달 콘텐츠 생성.
+- **핵심 기능**:
+  - **Tavily Search API**: 전 세계 웹 데이터를 실시간으로 수집하여 공신력 있고 최신성 있는 역사/경제 이슈 리스트를 확보합니다.
+  - **GPT-4o Mini**: 수집된 방대한 원천 데이터를 분석하여 사용자 맞춤형 핵심 이슈를 정제하고 요약하는 추론 엔진 역할을 합니다.
+  - **Gemini 3.1 Flash**: 정제된 이슈 텍스트와 컨텍스트를 기반으로 고퀄리티의 시각적 웹툰 이미지를 생성합니다.
 
 ---
 
@@ -144,9 +171,9 @@ curl "https://api.cloudflare.com/client/v4/accounts/b5604a8e6522c3b88f4df3ff1771
 
 - **성과**: 단일 프롬프트의 한계를 벗어나 검색-검증-선택-생성의 다단계 에이전트 협업 시스템 구축
 - **배운 점**: 상상 속의 아이디어를 AI 에이전트들이 협력하는 생산적인 시스템으로 구현하는 경험 확보
-- **검색 캐싱**: `TavilySearch`등의 웹 검색 결과를 캐싱해서 재활용하기 위한 Cache (`kv`) 서버 연계 예정
-- **이미지 저장**: `NanoBanana`를 통해 생성된 웹툰 이미지 파일을 저장하기 위한 Storage (`r2`) 서버 연계 예정
-- **챗봇 메시징**: `Streamlit` 웹 서비스 기반으로 사용자별 대화 맥락 유지를 위한 DB (`d1`) 서버 연계 예정
+- **검색 캐싱**: `TavilySearch`등의 웹 검색 결과를 캐싱해서 재활용하기 위한 Cache (`kv`) 서버 연계
+- **이미지 저장**: `NanoBanana`를 통해 생성된 웹툰 이미지 파일을 저장하기 위한 Storage (`r2`) 서버 연계
+- **챗봇 메시징**: `Streamlit` 웹 서비스 기반으로 사용자별 대화 맥락 유지를 위한 DB (`d1`) 서버 연계
 - **UI 사용성 개선**: 인터랙티브한 UI 서비스를 위해 최종적으로 `Reflex` 프레임워크 기반의 풀스택 앱으로 확장 예정
 
 ---
@@ -166,12 +193,12 @@ curl "https://api.cloudflare.com/client/v4/accounts/b5604a8e6522c3b88f4df3ff1771
 - **이미지 생성 차단 처리**: 지정학적 이슈 중 폭력성이나 민감한 정치적 사안으로 인해 OpenAI의 안전 가이드라인(`content_policy_violation`)에 걸릴 경우, 에러로 종료되지 않습니다.
 - **텍스트 대체 로직 (Fallback)**: 이미지가 차단된 경우, 해당 이슈의 핵심 내용을 담은 **텍스트 요약본**을 결과값으로 반환하여 전체 워크플로우의 연속성을 보장합니다.
 
-### 3. 병렬 실행 및 리소스 관리
+### 3. 병렬 실행 및 리소스 관리 (Send API)
 
 - **Send API 활용**: 사용자가 선택한 여러 이슈에 대해 이미지를 생성할 때, 순차 실행이 아닌 **병렬(Parallel) 실행**을 통해 응답 대기 시간을 획기적으로 줄였습니다.
 - **결과 확인**: 생성된 이미지는 Base64 데이터로 수집되며, 로컬 환경 실행 시 `image_{hash}.png` 형태로 자동 저장되어 실시간으로 결과물을 확인할 수 있습니다.
 
-### 4. 메모리 및 상태 관리
+### 4. 메모리 및 상태 관리 (Cloudflare D1)
 
 - **Checkpointer 연동**: `MemorySaver`를 사용하여 LangGraph 워크플로우의 상태를 인메모리에 저장하며, Human-in-the-loop(HITL) 단계에서 워크플로우의 안전한 일시 정지(Interrupt) 및 사용자 개입 후 재개(Resume)를 완벽하게 제어합니다.
 - 향후 Streamlit 웹 서비스 연동 시, 사용자별 대화 맥락 유지를 위한 영구 DB Checkpointer로 확장 예정입니다.
@@ -197,11 +224,11 @@ curl "https://api.cloudflare.com/client/v4/accounts/b5604a8e6522c3b88f4df3ff1771
   - **고화질 생성**: 교육용 콘텐츠에 적합한 깔끔하고 세련된 화풍 제공.
   - **속도 최적화**: Flash 기반 모델의 빠른 생성 속도로 사용자 대기 시간 단축.
 
-### 8. API 캐싱 및 비용 최적화 (Cloudflare KV & D1)
+### 8. API 캐싱 및 비용 최적화 (Cloudflare KV)
 
 본 프로젝트는 에이전트의 응답 속도를 극대화하고 외부 API(Tavily, Gemini) 호출 비용을 절감하기 위해 **이중 레이어 서버리스 캐싱 전략**을 도입했습니다.
 
-#### 8.1. 실시간 검색 결과 캐싱 (Cloudflare D1)
+#### 8.1. 실시간 검색 결과 캐싱
 
 - **현상**: 동일 조건(국가, 기간, 분야) 반복 검색 시 Tavily API 크레딧이 소모되고, 매번 3~5초의 네트워크 대기 시간이 발생함.
 - **해결**: 초저지연 글로벌 엣지 저장소인 **Cloudflare KV**를 활용하여 검색 결과를 캐싱함.
@@ -211,7 +238,7 @@ curl "https://api.cloudflare.com/client/v4/accounts/b5604a8e6522c3b88f4df3ff1771
   - **Cache Miss**: 최초 검색 시에만 Tavily API를 호출하고, 결과(JSON)를 KV에 저장.
 - **효과**: 중복 검색 시 응답 속도 95% 이상 단축 및 API 과금 원천 차단.
 
-#### 8.2. AI 웹툰 이미지 캐싱 (Cloudflare KV)
+#### 8.2. AI 웹툰 이미지 캐싱
 
 - **현상**: 동일한 역사적 이슈에 대해 웹툰 생성을 반복 요청할 경우, Gemini API 호출 비용이 발생하며 이미지 생성 시간(20~30초)이 매번 소요됨.
 - **해결**: 초저지연 글로벌 키-값 저장소인 **Cloudflare KV**를 활용한 이미지 경로 캐싱 도입.

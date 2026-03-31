@@ -31,7 +31,13 @@ def get_kv_cache(cache_key: str):
     url = f"{CF_REST_API_URL}/{CF_ACCOUNT_ID}/storage/kv/namespaces/{os.getenv('CF_KV_NAMESPACE_ID')}/values/{cache_key}"
     headers = {"Authorization": f"Bearer {CF_API_TOKEN}"}
     res = requests.get(url, headers=headers)
-    return res.json() if res.status_code == 200 else None
+    if res.status_code == 200:
+        # res.json() 대신 res.text를 가져와서 json.loads()로 변환!
+        try:
+            return json.loads(res.text)
+        except json.JSONDecodeError:
+            return res.text  # 만약 단순 문자열인 경우 대비
+    return None
 
 
 def set_kv_cache(cache_key: str, data: dict):

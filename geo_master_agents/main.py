@@ -139,11 +139,35 @@ if st.session_state.waiting_for_user and st.session_state.issues:
                 st.session_state.user_id,
                 resume_data=selected_indices,
             ):
-                if "cartoon_generation" in event:
-                    res = event["cartoon_generation"]["final_images"][0]
-                    if res["status"] == "success":
-                        st.success(f"생성 완료: {res['issue']}")
-                        st.image(res["file"])  # R2에서 발급된 URL 렌더링
+                # 1. 모든 이벤트를 출력해서 어떤 키가 들어오는지 확인 (디버깅용)
+                # st.write(event)
+
+                # 2. 노드 이름이 포함되어 있는지 유연하게 체크
+                for node_name, output in event.items():
+                    if node_name == "cartoon_generation":
+                        # 병렬 실행 결과이므로 리스트 형태임
+                        final_images = output.get("final_images", [])
+
+                        for res in final_images:
+                            if res.get("status") == "success":
+                                img_path = res.get("file") or res.get("url")
+                                is_cached = res.get("is_cached", False)
+
+                                if img_path:
+                                    # 1. UI 구분 (캐시 vs 신규 생성)
+                                    if is_cached:
+                                        st.info(
+                                            f"♻️ **기존 웹툰을 불러왔습니다** -> {res.get('issue')[9:].strip()}"
+                                        )
+                                    else:
+                                        st.success(
+                                            f"🎨 **새로운 웹툰이 완성되었습니다** -> {res.get('issue')[9:].strip()}"
+                                        )
+
+                                    # 2. 이미지 출력
+                                    st.image(img_path)
+                                else:
+                                    st.error("이미지 경로를 찾을 수 없습니다.")
 
         with st.spinner("Gemini Flash 3.1 모델이 이미지를 그리고 있습니다..."):
             generate_images()
