@@ -7,6 +7,13 @@ from tools import get_global_country_map
 st.set_page_config(page_title="지오 마스터 에이전트", layout="wide")
 
 # 세션 초기화 (로그인 유저 ID 임시 발급)
+if "messages" not in st.session_state:
+    st.session_state.messages = [
+        {
+            "role": "assistant",
+            "content": "안녕하세요! 어떤 국가의 어떤 분야 이슈를 웹툰으로 그려드릴까요?",
+        }
+    ]
 if "thread_id" not in st.session_state:
     st.session_state.thread_id = str(uuid.uuid4())
 if "issues" not in st.session_state:
@@ -16,19 +23,24 @@ if "waiting_for_user" not in st.session_state:
 
 # Streamlit 세션에 user_id가 있다고 가정
 if "user_id" not in st.session_state:
-    st.session_state.user_id = "test_user_999"
+    st.session_state.user_id = "guest"
 
 
 st.title("🌍 글로벌 이슈 웹툰")
 
 # 1. 초기 입력 폼
 with st.sidebar:
-    st.header("설정")
+    st.header("⚙️ 상세 설정")
     domain = st.selectbox(
         "분야", ["economy", "culture", "education", "science", "military"]
     )
     country_input = st.text_input("국가", "한국")
     years = st.number_input("기간(년)", min_value=1, max_value=100, value=10)
+
+    if st.button("대화 초기화"):
+        st.session_state.messages = []
+        st.session_state.thread_id = str(uuid.uuid4())
+        st.rerun()
 
     if st.button("이슈 검색 시작"):
         st.session_state.waiting_for_user = False
@@ -66,7 +78,47 @@ with st.sidebar:
             with st.spinner("Tavily 검색 및 LLM 분석 중..."):
                 fetch_issues()
 
-# 2. HITL (Human-in-the-loop) 화면
+# 2. 기존 대화 기록 출력
+for message in st.session_state.messages:
+    with st.chat_message(message["role"]):
+        st.markdown(message["content"])
+
+# 3. 사용자 입력 처리
+if prompt := st.chat_input("예: 한국의 경제 이슈를 알려줘"):
+    # 유저 메시지 표시 및 저장
+    st.session_state.messages.append({"role": "user", "content": prompt})
+    with st.chat_message("user"):
+        st.markdown(prompt)
+
+    # 에이전트 응답 생성
+    with st.chat_message("assistant"):
+        response_placeholder = st.empty()
+        full_response = ""
+
+        # 여기서 run_geo_agent를 호출 (국가명은 prompt에서 추출하거나 별도 로직 필요)
+        # 테스트를 위해 간단한 가이드 로직으로 구성
+        with st.spinner("에이전트가 생각 중..."):
+            input_data = {"country": prompt, "years": years, "domain": domain}
+
+            for event in run_geo_agent(input_data, st.session_state.thread_id):
+                if "history_search" in event:
+                    issues = event["history_search"]["issue_list"]
+                    full_response = (
+                        f"🔍 **{prompt}**에 대한 최근 주요 이슈를 찾았습니다:\n\n"
+                    )
+                    full_response += "\n".join(issues)
+                    response_placeholder.markdown(full_response)
+
+                if "__interrupt__" in event:
+                    full_response += "\n\n💡 **시각화할 이슈를 위 리스트에서 선택해주세요!** (아래 버튼 활성화)"
+                    response_placeholder.markdown(full_response)
+                    st.session_state.waiting_for_user = True
+
+        st.session_state.messages.append(
+            {"role": "assistant", "content": full_response}
+        )
+
+# 4. HITL (Human-in-the-loop) 화면
 if st.session_state.waiting_for_user and st.session_state.issues:
     st.subheader("💡 시각화할 이슈를 선택하세요")
 
@@ -91,8 +143,6 @@ if st.session_state.waiting_for_user and st.session_state.issues:
                     res = event["cartoon_generation"]["final_images"][0]
                     if res["status"] == "success":
                         st.success(f"생성 완료: {res['issue']}")
-                        # 🚨 디버깅용: 실제 URL이 어떻게 나오는지 화면에 찍어봅니다.
-                        st.write(f"DEBUG 이미지 주소: {res['file']}")
                         st.image(res["file"])  # R2에서 발급된 URL 렌더링
 
         with st.spinner("Gemini Flash 3.1 모델이 이미지를 그리고 있습니다..."):

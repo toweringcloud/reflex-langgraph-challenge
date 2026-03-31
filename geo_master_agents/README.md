@@ -1,4 +1,4 @@
-# 🌍 Geo Master Agent v3.0
+# 🌍 Geo Master Agent v3.1
 
 LangGraph와 Google GenAI SDK를 활용하여 특정 국가의 분야별 핵심 히스토리를 분석하고, 이를 바탕으로 한글 텍스트가 포함된 고품질 교육용 웹툰/삽화를 자동 생성하는 AI 에이전트입니다.
 
@@ -46,62 +46,73 @@ LangGraph와 Google GenAI SDK를 활용하여 특정 국가의 분야별 핵심 
 
 ## 3. 시스템 아키텍처
 
-아래 다이어그램은 유저의 터미널 입력부터 최종 이미지 파일이 로컬에 저장되기까지의 전체 데이터 파이프라인과 3계층(Interface, Tools, Agent) 아키텍처를 보여줍니다.
+아래 다이어그램은 유저의 터미널 입력부터 최종 이미지 파일이 로컬에 저장되기까지의 전체 데이터 파이프라인과 4계층(Interface, Agent, Serverless, Tools) 아키텍처를 보여줍니다.
 
 ```mermaid
 flowchart TB
     %% 스타일 정의
     classDef interface fill:#e3f2fd,stroke:#1e88e5,stroke-width:2px,color:#0d47a1
     classDef agent fill:#f3e5f5,stroke:#8e24aa,stroke-width:2px,color:#4a148c
+    classDef serverless fill:#fff3e0,stroke:#f4511e,stroke-width:2px,color:#e65100
     classDef tools fill:#e8f5e9,stroke:#43a047,stroke-width:2px,color:#1b5e20
-    classDef storage fill:#fff3e0,stroke:#f4511e,stroke-width:2px,color:#e65100
 
-    subgraph Interface ["🖥️ 인터페이스 레이어 (Terminal)"]
+    subgraph Interface ["🖥️ 프론트엔드 레이어 (Streamlit)"]
         direction TB
-        UI1(["초기 입력 (도메인/국가/기간)"])
-        UI2(["검색된 Top N 이슈 확인"])
-        UI3(["HITL (이미지 생성할 번호 선택)"])
-        UI4(["최종 결과 (이미지 경로) 확인"])
+        UI1(["초기 설정 입력<br/>(분야/국가/기간)"])
+        UI2(["이슈 리스트 렌더링<br/>(D1 Cache 조회)"])
+        UI3(["HITL 사용자 선택<br/>(체크박스 인덱스)"])
+        UI4(["최종 웹툰 전시<br/>(R2 Public URL)"])
     end
 
     subgraph Agent ["🧠 에이전트 레이어 (LangGraph)"]
         direction TB
-        State[("AgentState\n(상태 및 메모리 관리)")]
-        N1["search_historical_issues_node\n(검색 및 정제)"]
-        N2["approve_by_human_node\n(사용자 입력 대기/검증)"]
-        N3["trigger_parallel_jobs_node\n(Send API 분기)"]
-        N4["create_cartoon_image_node\n(병렬 이미지 생성)"]
+        Saver[("Cloudflare D1 Saver<br/>(Thread 상태 영구 저장)")]
+        N1["search_historical_issues_node<br/>(KV 기반 캐시 검색)"]
+        N2["approve_by_human_node<br/>(Interrupt & Resume)"]
+        N3["trigger_parallel_jobs_node<br/>(Send API 분기)"]
+        N4["cartoon_generation<br/>(KV 캐시 확인 및 이미지 생성)"]
 
-        State -.- N1 & N2 & N3 & N4
-        N1 -->|이슈 리스트 전달| N2
-        N2 -->|유효한 인덱스 전달| N3
-        N3 == "Map-Reduce (병렬 처리)" ==> N4
+        Saver -.- N1 & N2 & N3 & N4
+        N1 -->|이슈/연도 리스트| N2
+        N2 -->|선택된 인덱스/연도| N3
+        N3 == "Map-Reduce (병렬)" ==> N4
     end
 
-    subgraph Tools ["🛠️ 도구 레이어 (APIs & Storage)"]
+    subgraph Serverless ["☁️ 서버리스 레이어 (Cloudflare)"]
         direction TB
-        T1["Tavily Search API\n(데이터 수집)"]
-        T2["LLM (ChatOpenAI)\n(이슈 요약/정제)"]
-        T3["Google GenAI API\n(Gemini 3.1 Flash Image)"]
-        FS[("Local File System\n(/downloads 폴더)")]
+        D1[("D1 SQL DB<br/>(Checkpointer & History)")]
+        KV[("Workers KV<br/>(Search & Image Cache)")]
+        R2[("R2 Object Storage<br/>(웹툰 이미지 저장소)")]
     end
 
-    %% 레이어 간 상호작용 흐름
+    subgraph Tools ["🛠️ 외부 API"]
+        direction TB
+        Tavily["Tavily Search API<br/>(데이터 수집)"]
+        GPT["GPT 4o Mini<br/>(수집 결과 분석 및 추천)"]
+        Gemini["Gemini 3.1 Flash<br/>(카툰 이미지 생성)"]
+    end
+
+    %% 상호작용 흐름
     UI1 --> N1
-    N1 <--> T1
-    N1 <--> T2
+    N1 <--> GPT
+    N1 <--> KV
+    N1 <--> Tavily
     N1 --> UI2
+
     UI2 -. "사용자 개입 (Interrupt)" .-> UI3
     UI3 --> N2
-    N4 <--> T3
-    T3 --> FS
-    FS --> UI4
+    N2 <--> D1
+
+    N4 <--> KV
+    N4 <--> Gemini
+    Gemini --> R2
+    R2 --> UI4
 
     %% 클래스 적용
     class Interface interface
     class Agent agent
+    class Serverless serverless
     class Tools tools
-    class FS storage
 ```
 
 ### 💡 다이어그램이 보여주는 핵심 구조
@@ -186,13 +197,35 @@ curl "https://api.cloudflare.com/client/v4/accounts/b5604a8e6522c3b88f4df3ff1771
   - **고화질 생성**: 교육용 콘텐츠에 적합한 깔끔하고 세련된 화풍 제공.
   - **속도 최적화**: Flash 기반 모델의 빠른 생성 속도로 사용자 대기 시간 단축.
 
-### 8. API 캐싱 및 비용 최적화 (SQLite Cache)
+### 8. API 캐싱 및 비용 최적화 (Cloudflare KV & D1)
 
-- **현상**: 개발 및 테스트 과정에서 동일한 조건(국가, 기간, 도메인)으로 반복 검색 시, Tavily API 호출 크레딧이 불필요하게 소모되고 검색 대기 시간(3~5초)이 지속적으로 발생함.
-- **해결**: 파이썬 내장 `sqlite3`를 활용하여 로컬 데이터베이스(`search_cache.db`)에 검색 결과를 저장하는 캐싱(Caching) 시스템 도입.
-- **작동 방식**: 사용자의 입력값(`국가_기간_도메인`)을 고유한 캐시 키(Cache Key)로 생성. 일치하는 키가 DB에 존재하면 API 호출을 건너뛰고 캐시된 JSON 데이터를 즉시 반환(Cache Hit).
-- **효과**: 중복 검색 시 응답 속도를 0.1초 이내로 획기적으로 단축하고 API 비용 과금을 원천 차단.
-- **예외/초기화 처리**: 과거의 캐시 데이터가 아닌 **가장 최신의 실시간 검색 결과**를 다시 불러오고 싶다면, 프로젝트 루트 경로에 자동 생성된 `search_cache.db` 파일을 삭제한 후 에이전트를 재실행하면 됨.
+본 프로젝트는 에이전트의 응답 속도를 극대화하고 외부 API(Tavily, Gemini) 호출 비용을 절감하기 위해 **이중 레이어 서버리스 캐싱 전략**을 도입했습니다.
+
+#### 8.1. 실시간 검색 결과 캐싱 (Cloudflare D1)
+
+- **현상**: 동일 조건(국가, 기간, 분야) 반복 검색 시 Tavily API 크레딧이 소모되고, 매번 3~5초의 네트워크 대기 시간이 발생함.
+- **해결**: 초저지연 글로벌 엣지 저장소인 **Cloudflare KV**를 활용하여 검색 결과를 캐싱함.
+- **작동 방식**:
+  - 사용자 입력값(`{domain}_{country}_{years}`)을 조합하여 고유한 `search_cache_key` 생성.
+  - **Cache Hit**: 전 세계 엣지 노드에 복제된 KV에서 0.1초 이내에 검색 결과를 즉시 반환.
+  - **Cache Miss**: 최초 검색 시에만 Tavily API를 호출하고, 결과(JSON)를 KV에 저장.
+- **효과**: 중복 검색 시 응답 속도 95% 이상 단축 및 API 과금 원천 차단.
+
+#### 8.2. AI 웹툰 이미지 캐싱 (Cloudflare KV)
+
+- **현상**: 동일한 역사적 이슈에 대해 웹툰 생성을 반복 요청할 경우, Gemini API 호출 비용이 발생하며 이미지 생성 시간(20~30초)이 매번 소요됨.
+- **해결**: 초저지연 글로벌 키-값 저장소인 **Cloudflare KV**를 활용한 이미지 경로 캐싱 도입.
+- **작동 방식**:
+  - 선택된 이슈의 **개별 연도(yyyy)**와 핵심 키워드를 조합하여 고정 해시(`hashlib.md5`) 생성.
+  - **Key Format**: `{domain}_{country}_{year}_{text[:20]}`
+  - **Cache Hit**: Gemini 호출 단계를 건너뛰고 R2 스토리지에 저장된 이미지 URL을 즉시 반환하여 **0.5초 내 렌더링**.
+- **효과**: GPU 연산 비용 절감 및 사용자 경험(UX) 혁신.
+
+#### 8.3. 캐시 관리 및 데이터 무결성
+
+- **서버리스 영구 캐시**: 로컬 파일(`sqlite3`) 방식과 달리 Cloudflare 엣지 네트워크에 저장되므로, 서버(WSL2/Docker 등)를 재시작하거나 배포 환경이 바뀌어도 캐시가 유실되지 않음.
+- **해시 일관성 보장**: 파이썬 내장 `hash()` 함수는 보안상 프로세스 재시작 시 시드(Seed)가 변하여 키값이 달라지는 문제가 있음. 이를 해결하기 위해 `hashlib` 기반의 고정 해시 알고리즘을 채택하여 데이터 일관성을 보장함.
+- **데이터 갱신**: 최신 실시간 정보를 강제로 불러오고 싶다면 Cloudflare 대시보드(D1/KV)에서 해당 레코드를 삭제하거나, 새로운 `thread_id`로 세션을 시작함.
 
 ### 9. 다국어 및 국가명 입력 예외 처리 (Global Country Mapping)
 

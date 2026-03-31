@@ -1,3 +1,4 @@
+import hashlib
 import json
 import os
 
@@ -13,6 +14,16 @@ CF_REST_API_URL = "https://api.cloudflare.com/client/v4/accounts"
 CF_ACCOUNT_ID = os.getenv("CF_ACCOUNT_ID")
 CF_API_TOKEN = os.getenv("CF_ACCOUNT_API_TOKEN")
 BUCKET_NAME = os.getenv("CF_R2_BUCKET_NAME")
+
+
+def generate_cache_key_for_search(domain, country, years):
+    combined_str = f"{domain}_{country}_{years}"
+    return hashlib.md5(combined_str.encode()).hexdigest()
+
+
+def generate_cache_key_for_image(domain, country, year, issue_text):
+    combined_str = f"{domain}_{country}_{year}_{issue_text[:20]}"
+    return hashlib.md5(combined_str.encode()).hexdigest()
 
 
 # --- 1. KV (검색 캐싱) ---

@@ -24,6 +24,7 @@ from langgraph.checkpoint.base import (
 from openai import OpenAI
 from PIL import Image, ImageDraw, ImageFont
 from utils import (
+    generate_cache_key_for_search,
     get_image_url,
     get_kv_cache,
     insert_image_metadata,
@@ -123,7 +124,7 @@ def get_refined_issues(domain: str, country: str, years: int, top_n: int = 5) ->
     }
 
     # Step B: Raw 데이터 검색 (캐싱 로직 적용)
-    cache_key = abs(hash(f"{country}_{years}_{domain}"))
+    cache_key = generate_cache_key_for_search(domain, country, years)
     cache_val = get_kv_cache(cache_key)
     row = json.loads(cache_val) if cache_val else None
 
