@@ -1,4 +1,4 @@
-# 🌍 Geo Master Agent v3.2
+# 🌍 Geo Master Agent v3.3
 
 LangGraph와 Google GenAI SDK를 활용하여 특정 국가의 분야별 핵심 히스토리를 분석하고, 이를 바탕으로 한글 텍스트가 포함된 고품질 교육용 웹툰/삽화를 자동 생성하는 AI 에이전트입니다.
 
@@ -58,6 +58,7 @@ flowchart TB
 
     subgraph Interface ["🟦 프론트엔드 레이어 (Streamlit)"]
         direction TB
+        Chat["Chat Interface<br/>(자연어 채팅 입력)"]
         UI1(["초기 설정 입력<br/>(분야/국가/기간)"])
         UI2(["이슈 리스트 렌더링<br/>(KV Cache 조회)"])
         UI3(["HITL 사용자 선택<br/>(체크박스 인덱스)"])
@@ -67,12 +68,14 @@ flowchart TB
     subgraph Agent ["🟪 에이전트 레이어 (LangGraph)"]
         direction TB
         Saver[("Cloudflare D1 Saver<br/>(Thread 상태 영구 저장)")]
+        N0["classify_user_intent_node<br/>(자연어 의도 및 조건 추출)"]
         N1["search_historical_issues_node<br/>(KV 기반 캐시 검색)"]
         N2["approve_by_human_node<br/>(Interrupt & Resume)"]
         N3["trigger_parallel_jobs_node<br/>(Send API 분기)"]
-        N4["cartoon_generation<br/>(KV 캐시 확인 및 이미지 생성)"]
+        N4["create_cartoon_image_node<br/>(KV 캐시 확인 및 이미지 생성)"]
 
-        Saver -.- N1 & N2 & N3 & N4
+        Saver -.- N0 & N1 & N2 & N3 & N4
+        N0 -->|국가/분야/기간| N1
         N1 -->|이슈/연도 리스트| N2
         N2 -->|선택된 인덱스/연도| N3
         N3 == "Map-Reduce (병렬)" ==> N4
@@ -88,17 +91,18 @@ flowchart TB
     subgraph Tools ["🟩 외부 API 및 도구"]
         direction TB
         Tavily["Tavily Search API<br/>(데이터 수집)"]
-        GPT["GPT 4o Mini<br/>(수집 결과 분석 및 추천)"]
+        GPT["GPT-4o Mini<br/>(의도 분석 및 이슈 정제)"]
         Gemini["Gemini 3.1 Flash<br/>(카툰 이미지 생성)"]
     end
 
     %% 상호작용 흐름
-    UI1 --> N1
-    N1 <--> GPT
+    Chat --> N0
+    N0 <--> GPT
     N1 <--> KV
     N1 <--> Tavily
     N1 --> UI2
 
+    UI1 --> N1
     UI2 -. "사용자 개입 (Interrupt)" .-> UI3
     UI3 --> N2
     N2 <--> D1

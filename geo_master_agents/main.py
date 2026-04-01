@@ -95,19 +95,36 @@ if prompt := st.chat_input("예: 한국의 경제 이슈를 알려줘"):
         response_placeholder = st.empty()
         full_response = ""
 
-        # 여기서 run_geo_agent를 호출 (국가명은 prompt에서 추출하거나 별도 로직 필요)
-        # 테스트를 위해 간단한 가이드 로직으로 구성
+        # 여기서 run_geo_agent를 호출 (classify_user_intent_node에서 country 추출)
         with st.spinner("에이전트가 생각 중..."):
-            input_data = {"country": prompt, "years": years, "domain": domain}
+            input_data = {
+                "messages": [("user", prompt)],  # LangChain 메시지 형식
+                "years": years,
+                "domain": domain,
+            }
 
             for event in run_geo_agent(input_data, st.session_state.thread_id):
                 if "history_search" in event:
-                    issues = event["history_search"]["issue_list"]
-                    full_response = (
-                        f"🔍 **{prompt}**에 대한 최근 주요 이슈를 찾았습니다:\n\n"
-                    )
-                    full_response += "\n".join(issues)
-                    response_placeholder.markdown(full_response)
+                    result_data = event["history_search"]
+
+                    # 정상적으로 이슈 리스트가 돌아온 경우
+                    if "issue_list" in result_data:
+                        issues = result_data["issue_list"]
+
+                        # 🚨 에이전트가 찾은 이슈를 세션에 저장
+                        st.session_state.issues = issues
+
+                        full_response = (
+                            f"🔍 **{prompt}**에 대한 최근 주요 이슈를 찾았습니다:\n\n"
+                        )
+                        full_response += "\n".join(issues)
+                        response_placeholder.markdown(full_response)
+
+                    # 국가 정보가 부족해 에러 메시지가 돌아온 경우
+                    elif "messages" in result_data:
+                        error_msg = result_data["messages"][0][1]  # 에러 텍스트 추출
+                        response_placeholder.markdown(f"⚠️ {error_msg}")
+                        # 이 경우 interrupt가 발생하지 않으므로 여기서 루프 통과
 
                 if "__interrupt__" in event:
                     full_response += "\n\n💡 **시각화할 이슈를 위 리스트에서 선택해주세요!** (아래 버튼 활성화)"
@@ -149,6 +166,13 @@ if st.session_state.waiting_for_user and st.session_state.issues:
                         final_images = output.get("final_images", [])
 
                         for res in final_images:
+                            issue_title = (
+                                res.get("issue")[9:].strip()
+                                if res.get("issue")
+                                else "알 수 없는 이슈"
+                            )
+
+                            # ✅ 1. 성공 시 기존 로직 그대로 처리
                             if res.get("status") == "success":
                                 img_path = res.get("file") or res.get("url")
                                 is_cached = res.get("is_cached", False)
@@ -168,6 +192,15 @@ if st.session_state.waiting_for_user and st.session_state.issues:
                                     st.image(img_path)
                                 else:
                                     st.error("이미지 경로를 찾을 수 없습니다.")
+
+                            # 🚨 2. 실패 시 Warning 노출 로직 추가!
+                            else:
+                                error_message = (
+                                    res.get("text") or "알 수 없는 오류가 발생했습니다."
+                                )
+                                st.warning(
+                                    f"⚠️ **생성 지연:** {issue_title}\n\n{error_message}"
+                                )
 
         with st.spinner("Gemini Flash 3.1 모델이 이미지를 그리고 있습니다..."):
             generate_images()

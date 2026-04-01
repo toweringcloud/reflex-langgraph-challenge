@@ -23,6 +23,7 @@ from langgraph.checkpoint.base import (
 )
 from openai import OpenAI
 from PIL import Image, ImageDraw, ImageFont
+from tenacity import retry, stop_after_attempt, wait_exponential
 from utils import (
     generate_cache_key_for_search,
     get_image_url,
@@ -34,6 +35,26 @@ from utils import (
 
 # .env 파일 로드
 load_dotenv()
+
+# 로깅 설정 (재시도 상황을 터미널에서 보기 위함)
+logger = logging.getLogger(__name__)
+
+
+def log_retry_attempt(retry_state):
+    logger.warning(
+        f"⚠️ Gemini API 503 지연 발생! {retry_state.attempt_number}번째 재시도 중... "
+        f"(대기 시간: {retry_state.idle_for}초)"
+    )
+
+
+def handle_retry_error(retry_state):
+    """모든 재시도(4회) 실패 시 호출되는 콜백 함수"""
+    # 에이전트가 죽지 않도록, 실패했다는 '상태 정보'를 딕셔너리로 반환합니다.
+    return {
+        "status": "error",
+        "fallback_text": "🚦 구글 서버(Gemini)에 요청이 너무 많아 대기 시간이 초과되었습니다. 1~2분 뒤 다시 시도해 주세요!",
+    }
+
 
 # 지오 마스터 에이전트 전용 LLM 정의
 llm = ChatOpenAI(
@@ -320,6 +341,16 @@ def generate_single_image2(prompt: str) -> dict:
 
 
 # Tool 2c: 이미지 생성 (Nano Banana 2 활용) + R2 업로드 + D1 메타데이터 저장
+# ---------------------------------------------------------
+# 🚨 총 4번 재시도, 3초/6초/12초 간격으로 점진적 대기
+# ---------------------------------------------------------
+@retry(
+    stop=stop_after_attempt(4),
+    wait=wait_exponential(multiplier=2, min=3, max=15),
+    after=log_retry_attempt,
+    reraise=True,  # 모든 재시도 실패 시 최종 에러 반환
+    retry_error_callback=handle_retry_error,  # 👈 실패 시 죽지 않고 대체 값 반환
+)
 def generate_single_image3(prompt: str, user_id: str) -> dict:
     """
     Nano Banana (Gemini Image)를 사용하여 한글이 포함된 고해상도 교육 삽화를 생성합니다.
@@ -369,13 +400,25 @@ def generate_single_image3(prompt: str, user_id: str) -> dict:
             raise ValueError("응답에 이미지 데이터가 포함되어 있지 않습니다.")
 
     except Exception as e:
-        logging.error(f"API 에러: {e}")
+        error_msg = str(e)
+        logging.error(f"API 에러: {error_msg}")
 
-        return {
-            "status": "filtered",
-            "fallback_text": "안전 정책 또는 API 오류로 인해 이미지 생성이 차단되었습니다.",
-            "reason": f"Safety filters or API error: {e}",
-        }
+        # 💡 503 에러이거나 "고부하(high demand)" 관련 에러일 경우,
+        # Exception을 발생(raise)시켜야 tenacity가 "아, 실패했구나! 다시 시도하자"라고 인식합니다.
+        if (
+            "503" in error_msg
+            or "high demand" in error_msg
+            or "UNAVAILABLE" in error_msg
+        ):
+            raise e  # 👈 tenacity에게 재시도를 요청하기 위해 에러를 다시 던집니다.
+
+        # 그 외의 심각한 에러(예: API 키 오류 등)는 재시도하지 않고 바로 실패 반환
+        return {"status": "error", "fallback_text": error_msg}
+        # return {
+        #     "status": "filtered",
+        #     "fallback_text": "안전 정책 또는 API 오류로 인해 이미지 생성이 차단되었습니다.",
+        #     "reason": f"Safety filters or API error: {e}",
+        # }
 
 
 # Cloudflare D1의 REST API와 통신하는 커스텀 클래스
@@ -456,7 +499,7 @@ class CloudflareD1Saver(BaseCheckpointSaver):
         _, chk_blob = self.serde.dumps_typed(checkpoint)
         _, meta_blob = self.serde.dumps_typed(metadata)
 
-        # 🚨 [핵심 수정] Binary(바이트) 데이터를 안전한 Base64 문자열로 인코딩
+        # 🚨 Binary(바이트) 데이터를 안전한 Base64 문자열로 인코딩
         chk_str = base64.b64encode(chk_blob).decode("ascii")
         meta_str = base64.b64encode(meta_blob).decode("ascii")
 
@@ -489,7 +532,7 @@ class CloudflareD1Saver(BaseCheckpointSaver):
             # 바이트를 Base64 문자열로 인코딩
             blob_str = base64.b64encode(blob).decode("ascii")
 
-            # 🚨 [핵심 수정] 중복 에러(UNIQUE constraint failed) 방지를 위한 UPSERT 구문 적용
+            # 🚨 중복 에러(UNIQUE constraint failed) 방지를 위한 UPSERT 구문 적용
             sql = """
                 INSERT INTO checkpoint_writes (thread_id, checkpoint_id, task_id, idx, channel, type, blob)
                 VALUES (?, ?, ?, ?, ?, ?, ?)

@@ -1,10 +1,12 @@
 import operator
 import re
-from typing import Annotated, List, TypedDict
+from typing import Annotated, Any, List, TypedDict
 
 from langchain_core.runnables import RunnableConfig
+from langchain_openai import ChatOpenAI
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command, Send, interrupt
+from pydantic import BaseModel, Field
 from tools import (
     CloudflareD1Saver,
     generate_single_image3,
@@ -26,6 +28,7 @@ class AgentState(TypedDict):
     selected_indices: List[int]  # 사용자가 선택한 번호들 (HITL 입력값)
     selected_years: List[int]  # 선택한 이슈의 연도(yyyy) 값들
     final_images: Annotated[List[dict], operator.add]  # 병렬 실행 결과 취합
+    messages: List[Any]
 
 
 # 병렬 Node용 개별 State
@@ -36,14 +39,96 @@ class ImageTaskState(TypedDict):
     country: str  # 캐시 키용 국가 정보
 
 
+# 사용자의 입력에서 추출할 데이터 구조 정의
+class UserIntent(BaseModel):
+    country: str = Field(description="추출된 국가 이름 (예: 한국, 미국, 영국)")
+    domain: str = Field(
+        description="관심 분야 (economy, culture, education, science, military 중 선택)",
+        default="economy",
+    )
+    years: int = Field(description="조사 기간 (숫자만 추출, 범위는 1~100)", default=10)
+    is_valid: bool = Field(description="국가 정보가 포함되어 있어 검색이 가능한지 여부")
+
+
 # 2. Node용 Action 함수 정의
+def classify_user_intent_node(state: AgentState):
+    """단계 0: 사용자 의도 분석"""
+
+    llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
+    structured_llm = llm.with_structured_output(UserIntent)
+
+    messages = state.get("messages", [])
+    if not messages:
+        if state.get("country"):
+            return {}  # 이미 국가 정보가 있다면 의도 분석 패스!
+        else:
+            return {
+                "messages": [
+                    ("assistant", "질문을 이해하지 못했어요. 다시 말씀해 주시겠어요?")
+                ]
+            }
+
+    # 최근 사용자 메시지 가져오기 (튜플 형태인지 객체 형태인지 확인하여 순수 텍스트만 추출)
+    last_message = messages[-1]
+    if isinstance(last_message, tuple):
+        user_query = last_message[1]  # ("user", "텍스트") 형태인 경우
+    else:
+        user_query = getattr(last_message, "content", str(last_message))
+
+    system_prompt = """당신은 사용자의 질문에서 국가, 분야, 기간을 추출하는 전문가입니다.
+    분야는 반드시 [economy, culture, education, science, military] 중 하나로 매핑하세요.
+    국가 정보가 전혀 없다면 is_valid를 False로 설정하세요."""
+
+    intent = structured_llm.invoke(
+        [
+            ("system", system_prompt),
+            ("user", user_query),
+        ]
+    )
+
+    if not intent.is_valid:
+        return {
+            "messages": [
+                (
+                    "assistant",
+                    "어느 국가의 소식을 찾아드릴까요? 국가명을 포함해 말씀해 주세요!",
+                )
+            ]
+        }
+
+    # 추출된 정보를 State에 업데이트
+    return {
+        "country": intent.country,
+        "domain": intent.domain,
+        "years": intent.years,
+        "messages": [
+            (
+                "assistant",
+                f"🔎 {intent.country}의 {intent.domain} 이슈({intent.years}년치)를 분석해 드릴게요.",
+            )
+        ],
+    }
+
+
 def search_historical_issues_node(state: AgentState):
     """단계 1: 주요 히스토리 검색 및 LLM을 통한 Top N 필터링"""
+
     # 1. State에서 필요한 값 추출
-    domain = state["domain"]
-    country = state["country"]
-    years = state["years"]
+    domain = state.get("domain", "economy")
+    country = state.get("country")
+    years = state.get("years", 10)
     top_n = 5
+
+    if not country:
+        # 국가 정보가 없으면 다시 물어보는 메시지 반환
+        return {
+            "messages": [
+                (
+                    "assistant",
+                    "죄송합니다. 국가 정보를 찾지 못했어요. 어느 나라인지 다시 말씀해 주세요.",
+                )
+            ]
+        }
 
     # 2. Tool 호출 (State 값을 인자로 전달)
     results = get_refined_issues(domain, country, years, top_n)
@@ -52,6 +137,7 @@ def search_historical_issues_node(state: AgentState):
 
 def approve_by_human_node(state: AgentState):
     """단계 2: 사용자가 선택한 인덱스를 받아 검증하는 HITL 노드 (Streamlit 전용)"""
+
     max_idx = len(state["issue_list"])
 
     # 1. 그래프 중단 및 사용자 입력 대기 (Streamlit에서 resume_data로 전달됨)
@@ -177,24 +263,47 @@ def create_cartoon_image_node(state: ImageTaskState, config: RunnableConfig):
         }
 
 
+# 조건부 로직: 국가 정보가 확인되면 검색으로, 아니면 종료(대기)
+def should_continue_to_search(state: AgentState):
+    if state.get("country"):
+        return "history_search"
+    return END
+
+
 # 3. Graph 구성 with Nodes and Edges
 workflow = StateGraph(AgentState)
 
+workflow.add_node("intent_classify", classify_user_intent_node)
 workflow.add_node("history_search", search_historical_issues_node)
 workflow.add_node("user_approval", approve_by_human_node)
 workflow.add_node("cartoon_generation", create_cartoon_image_node)
 
-# 기본 Edge 연결 (순차적 흐름)
-workflow.add_edge(START, "history_search")
-workflow.add_edge("history_search", "user_approval")
-workflow.add_edge("cartoon_generation", END)
+# 챗 메시지의 맥락을 파악 후, 질문에 필수 조건이 모두 있는 지 확인
+# 1. 시작은 무조건 의도 분석 노드부터! (Single Entry Point):
+workflow.add_edge(START, "intent_classify")
 
-# 조건부 Edge 연결 (병렬 실행)
+# 2. 의도 분석 결과에 따른 분기 (국가 정보가 있으면 검색으로, 없으면 종료/대기)
 workflow.add_conditional_edges(
-    "user_approval", trigger_parallel_jobs_node, ["cartoon_generation"]
+    "intent_classify",
+    should_continue_to_search,
+    {"history_search": "history_search", END: END},
 )
 
-# 영구 체크포인터 정의 - HITL을 위해 상태 저장이 필요함
+# 3. 검색 이후의 흐름은 기존과 동일하게 연결
+# 이슈 분석 대상 도메인 + 국가 + 기간 선택 후, 이슈 검색 실행
+workflow.add_edge("history_search", "user_approval")
+
+# 4. 사용자 승인(HITL) 이후 병렬 이미지 생성 트리거
+workflow.add_conditional_edges(
+    "user_approval",
+    trigger_parallel_jobs_node,
+    ["cartoon_generation"],
+)
+
+# 5. 모든 이미지 생성 완료 후 종료
+workflow.add_edge("cartoon_generation", END)
+
+# 영구 체크포인터 정의 - HITL을 위해 상태 저장 必
 memory = CloudflareD1Saver()
 app = workflow.compile(checkpointer=memory)
 
