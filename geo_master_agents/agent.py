@@ -226,7 +226,9 @@ def create_cartoon_image_node(state: ImageTaskState, config: RunnableConfig):
     refined_text = issue_text[3:].strip()
     user_id = config.get("configurable", {}).get("user_id", "guest")
     result = generate_single_image3(refined_text, user_id)
-    print("✅ [이미지 생성 완료] 결과를 반환합니다.")
+    print(
+        f"✅ [이미지 생성 완료] 결과({state.get('domain')}-{state.get('country')}-{state.get('year')})를 반환합니다."
+    )
 
     # 에러 방지 (예: 도구 내부에서 예외 발생 시 문자열 리턴)
     if isinstance(result, str):

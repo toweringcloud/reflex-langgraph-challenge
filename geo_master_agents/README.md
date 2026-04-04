@@ -1,4 +1,4 @@
-# 🌍 Geo Master Agent v3.3
+# 🌍 Geo Master Agent v3.4
 
 LangGraph와 Google GenAI SDK를 활용하여 특정 국가의 분야별 핵심 히스토리를 분석하고, 이를 바탕으로 한글 텍스트가 포함된 고품질 교육용 웹툰/삽화를 자동 생성하는 AI 에이전트입니다.
 
@@ -19,28 +19,36 @@ LangGraph와 Google GenAI SDK를 활용하여 특정 국가의 분야별 핵심 
 
 ## 2. 그래프 구조
 
-### 📋 States (상태 변수)
+## 2. 그래프 구조
 
-| 필드명             | 타입         | 설명                                              |
-| :----------------- | :----------- | :------------------------------------------------ |
-| `domain`           | `str`        | 유저가 선택한 분석 대상 도메인 (경제, 문화 등)    |
-| `country`          | `str`        | 유저가 입력한 대상 국가                           |
-| `years`            | `int`        | 분석 대상 기간 (최근 1년 ~ 100년)                 |
-| `issue_list`       | `List[str]`  | LLM이 정제하여 반환한 Top 5 이슈 리스트           |
-| `selected_indices` | `List[int]`  | 사용자가 선택한 이슈의 인덱스 번호 (HITL 입력값)  |
-| `final_images`     | `List[dict]` | 병렬 노드에서 생성된 이미지 데이터 및 설명의 집합 |
+### 📄 States (상태 변수)
+
+| 필드명             | 타입         | 설명                                                            |
+| :----------------- | :----------- | :-------------------------------------------------------------- |
+| `domain`           | `str`        | 유저가 선택한 분석 대상 도메인 (경제, 문화 등)                  |
+| `country`          | `str`        | 유저가 입력/추출한 대상 국가                                    |
+| `years`            | `int`        | 분석 대상 기간 (최근 1년 ~ 100년)                               |
+| `issue_list`       | `List[str]`  | LLM이 정제하여 반환한 Top 5 이슈 리스트                         |
+| `selected_indices` | `List[int]`  | 사용자가 선택한 이슈의 인덱스 번호 (HITL 입력값)                |
+| `selected_years`   | `List[int]`  | 선택된 이슈 텍스트에서 추출된 개별 연도(yyyy) 리스트            |
+| `final_images`     | `List[dict]` | 병렬 노드에서 생성된 이미지 데이터(URL, 캐시 적중 여부 등) 집합 |
+| `messages`         | `List[Any]`  | 챗봇 UI와 연동하기 위한 대화 기록 및 에이전트 시스템 메시지     |
 
 ### 🛠️ Nodes (작업 단위)
 
-1. **`history_search`**: `tools.get_refined_issues`를 호출하여 웹 검색 및 LLM 필터링 수행
-2. **`user_approval`**: `interrupt` 함수를 통해 그래프 실행을 일시 중지하고 사용자 입력 대기
-3. **`parallel_trigger`**: 사용자가 선택한 인덱스만큼 `Send` 객체를 생성하여 병렬 노드 호출
-4. **`cartoon_generation`**: 개별 이슈에 대해 DALL-E 3 이미지를 생성하고 결과를 `final_images`에 추가
+1. **`intent_classify`**: 사용자의 자연어 입력에서 검색에 필요한 핵심 파라미터(국가, 분야, 기간)를 추출하고 정제하는 진입점 노드.
+2. **`history_search`**: `tools.get_refined_issues`를 호출하여 웹 검색 및 LLM 필터링 수행 (KV 캐싱 적용).
+3. **`user_approval`**: `interrupt` 함수를 통해 그래프 실행을 일시 중지하고 사용자 입력(이슈 선택) 대기 (HITL).
+4. **`trigger_parallel_jobs_node`**: 사용자가 선택한 인덱스와 연도를 쌍으로 묶어 `Send` 객체를 생성하여 병렬 노드 호출 (Map-Reduce 패턴).
+5. **`cartoon_generation`**: 개별 이슈에 대해 KV 캐시를 확인하고, 미적중 시 **Gemini 3.1 Flash** 모델을 통해 웹툰 이미지를 병렬로 생성.
 
 ### 🔄 Edges (흐름 제어)
 
-- **기본 흐름**: `START` → `history_search` → `user_approval`
-- **조건부 병렬 실행**: `user_approval` → (사용자 입력 수신) → `parallel_trigger` → `cartoon_generation (Parallel)` → `END`
+- **진입 및 의도 분석**: `START` → `intent_classify`
+- **조건부 검색 진입**: `intent_classify` → (국가 정보 확인 시) `history_search` / (정보 누락 시 대기) `END`
+- **사용자 승인 대기**: `history_search` → `user_approval`
+- **조건부 병렬 실행**: `user_approval` → (사용자 입력 수신 및 분기) `trigger_parallel_jobs_node` → `cartoon_generation` (Parallel)
+- **종료**: `cartoon_generation` → `END`
 
 ---
 
@@ -266,3 +274,33 @@ curl "https://api.cloudflare.com/client/v4/accounts/b5604a8e6522c3b88f4df3ff1771
   - 사용자의 모든 입력값을 대소문자 구분 없이 소문자로 변환(`.lower()`)하여 맵핑 딕셔너리와 대조하는 검증 로직 적용.
   - **데이터 표준화**: 유효한 입력으로 판별되면, 검색 정확도를 극대화하기 위해 에이전트 내부 상태(`State`)에는 반드시 **공식 영문 명칭(예: `Korea, Republic of`)**으로 변환하여 저장.
   - **안전한 루프(Fallback)**: 딕셔너리에 존재하지 않는 완전히 잘못된 값이나 오타가 입력될 경우, 에이전트가 다운(Crash)되지 않고 `while True` 루프를 통해 경고 메시지("❌ 등록되지 않거나 잘못된 국가명입니다")를 출력한 뒤 재입력을 유도하도록 견고하게 설계됨.
+
+### 10. 지능형 의도 분석 및 LLM 입력 포맷 최적화 (Intent Classification)
+
+- **현상**: 사용자의 자연어 입력에서 국가/분야/기간을 직접 추출하기 위해 `classify_user_intent_node`를 도입했으나, LangChain의 메시지 객체(Tuple 형태)가 OpenAI API로 그대로 전달되어 `400 Bad Request (Invalid type)` 에러가 발생함.
+- **해결 및 방어 로직**:
+  - 메시지 리스트에서 마지막 사용자의 입력을 추출할 때, 데이터 타입(Tuple vs Object)을 동적으로 판별하여 순수 문자열(String)로 정제한 뒤 LLM 프롬프트에 주입하도록 수정.
+  - 국가 정보가 누락된 경우 에이전트가 에러를 발생시키는 대신, 사용자에게 재입력을 요청하는 유연한 대화형(Fallback) 메시지를 반환하도록 처리.
+
+### 11. API 과부하(503 에러) 대응 및 자동 재시도 (Exponential Backoff)
+
+- **현상**: Gemini 3.1 Flash 모델의 높은 트래픽으로 인해 간헐적으로 `503 UNAVAILABLE` 또는 고부하 에러가 발생하며 에이전트가 중단되는 현상 발생.
+- **해결**: `tenacity` 라이브러리를 활용한 **지수 백오프(Exponential Backoff)** 재시도 로직 적용.
+  - 총 4회 재시도하며, 대기 시간을 점진적으로 증가(3초 ➔ 6초 ➔ 12초)시켜 서버 부담을 최소화함.
+  - **Graceful Degradation**: 모든 재시도에 실패하더라도 앱이 다운(Crash)되지 않도록 `retry_error_callback`을 구현하여, UI 상에 친절한 노란색 경고(Warning) 뱃지와 지연 안내 메시지를 출력하도록 안정성 확보.
+
+### 12. 상태 기반 UI 렌더링 및 화면 증발(Vanishing UI) 방지
+
+- **현상**: 비동기 이미지 생성 완료 후 `st.rerun()` 호출 시 화면의 이미지가 사라지거나, 처리 중 사용자가 다른 버튼을 연타하여 상태가 엉키고 간헐적인 `KeyError`가 발생하는 문제.
+- **해결 및 UI/UX 개선**:
+  - **단방향 제어(State Lock)**: `is_processing` 세션 상태를 도입하여 작업 진행 중에는 모든 사이드바 입력창과 채팅창, 버튼들을 비활성화(Disabled)하여 중복 실행 원천 차단.
+  - **안전한 데이터 추출**: 딕셔너리 데이터 접근 시 `[]` 대신 `.get()` 메서드를 적극 활용하여 데이터 누락 시에도 안전하게 우회하도록 방어적 코딩 적용.
+  - **대화 기록 영구 보존**: 생성된 이미지 경로와 캐시 여부를 `st.session_state.messages`에 딕셔너리 형태로 저장하여, 화면 갱신(`st.rerun()`) 이후에도 채팅창 맨 아래에 이미지가 안정적으로 렌더링되도록 구조화.
+  - **동적 UI 숨김**: 웹툰 생성 버튼 클릭 즉시 `waiting_for_user = False`로 상태를 변경하여, 완료된 메뉴판(체크박스)을 화면에서 즉시 제거해 레이아웃을 깔끔하게 유지.
+
+### 13. LangGraph 세션(Thread) 충돌 방지 및 메모리 초기화
+
+- **현상**: 이전 검색 결과가 LangGraph의 Thread(메모리)에 남아있는 상태에서 새로운 이슈 검색을 시도할 경우, 체크포인터의 상태가 충돌하여 화면에 아무런 반응이 없는 먹통 현상 발생.
+- **해결**:
+  - 사이드바의 '이슈 검색 시작' 버튼을 클릭하거나, 채팅창을 통해 신규 검색을 시작할 때마다 `st.session_state.thread_id`를 새로운 UUID(`uuid.uuid4()`)로 즉시 갱신하도록 로직 수정.
+- **효과**: 매 검색마다 에이전트가 이전 맥락의 간섭 없이 완전히 깨끗한 상태(Clean State)에서 워크플로우를 시작하도록 보장하여 무반응 버그 완벽 해결.

@@ -71,7 +71,7 @@ def get_domain_keyword(input: str) -> str:
         "culture": "문화",
         "education": "교육",
         "science": "과학기술",
-        "military": "방위산업",
+        "military": "방산",
     }
     return domain_keywords.get(input, "교육")
 
@@ -468,7 +468,6 @@ class CloudflareD1Saver(BaseCheckpointSaver):
             chk_blob = base64.b64decode(row["checkpoint"])
             meta_blob = base64.b64decode(row["metadata"])
 
-            # 🚨 [수정된 부분] "json" 하드코딩을 지우고, 스마트 디코딩(try-except) 적용!
             # 1. Checkpoint 복원 (msgpack 우선 시도)
             try:
                 chk = self.serde.loads_typed(("msgpack", chk_blob))
