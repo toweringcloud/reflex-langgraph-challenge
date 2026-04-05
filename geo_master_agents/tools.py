@@ -114,6 +114,8 @@ def get_global_country_map():
         "영국": "United Kingdom",
         "러시아": "Russian Federation",
         "호주": "Australia",
+        "뉴질랜드": "New Zealand",
+        "스위스": "Switzerland",
     }
 
     # 수동 보완 데이터도 모두 소문자 키로 저장

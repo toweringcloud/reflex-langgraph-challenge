@@ -315,7 +315,7 @@ def run_geo_agent(
     initial_input: dict, thread_id: str, user_id: str = "unknown", resume_data=None
 ):
     """
-    Streamlit UI에서 호출하는 비동기 에이전트 실행 함수입니다.
+    Streamlit UI에서 호출하는 에이전트 실행 함수입니다.
     """
     print("🌍 [지오 마스터 에이전트]를 시작합니다.")
 
