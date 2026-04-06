@@ -49,6 +49,8 @@ if "start_search" not in st.session_state:
     st.session_state.start_search = False
 if "start_generation" not in st.session_state:
     st.session_state.start_generation = False
+if "country_input" not in st.session_state:
+    st.session_state.country_input = ""
 if "selected_indices" not in st.session_state:
     st.session_state.selected_indices = []
 if "issues" not in st.session_state:
@@ -92,19 +94,14 @@ with st.sidebar:
         "관심 분야",
         options=list(domain_mapping.keys()),
         format_func=lambda x: domain_mapping[x],
-        # 🚨 초기값을 index로 주입합니다.
-        # index=list(domain_mapping.keys()).index(st.session_state.sidebar_domain),
         key="sidebar_domain",  # 👈 위젯 전용 내부 키
-        # on_change=update_domain,  # 👈 사용자가 직접 클릭하면 상태를 업데이트
         disabled=st.session_state.is_processing,
     )
 
     # Text input은 초기값을 value로 주입합니다.
     country_input = st.text_input(
         "대상 국가",
-        # value=st.session_state.sidebar_country,  # 🚨 초기값 주입
         key="sidebar_country",
-        # on_change=update_country,
         disabled=st.session_state.is_processing,
     )
 
@@ -113,9 +110,7 @@ with st.sidebar:
         "검색 기간(년)",
         min_value=1,
         max_value=100,
-        # value=st.session_state.sidebar_years,  # 🚨 초기값 주입
         key="sidebar_years",
-        # on_change=update_years,
         disabled=st.session_state.is_processing,
     )
 
@@ -503,13 +498,10 @@ if st.session_state.start_generation:
         components.html(html_code, height=525)
 
     # 🚨 3. 슬라이드쇼가 브라우저에서 도는 동안 파이썬은 열심히 스피너와 함께 이미지를 생성합니다.
-    selected_issue = (
-        st.session_state["country_input"]
-        + "의 "
-        + get_domain_keyword(st.session_state["sidebar_domain"])
-        + " 이슈"
-    )
-    with st.spinner(f"{selected_issue}에 대한 웹툰 이미지를 그리고 있습니다..."):
+    country_name = st.session_state.get("country_input", "선택 국가")
+    target_info = f"{country_name}의 이슈"
+
+    with st.spinner(f"{target_info}에 대한 웹툰 이미지를 그리고 있습니다..."):
         generate_images()
 
     # 작업 완료 후, 상태 복구 및 리런하여 UI 잠금 해제
