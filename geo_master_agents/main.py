@@ -55,12 +55,12 @@ if "pending_updates" in st.session_state:
     del st.session_state.pending_updates
 
 
-st.title("🌍 글로벌 이슈 웹툰")
+st.title("🌍 Geo Master Agent")
 
 
 # 1. 초기 입력 폼
 with st.sidebar:
-    st.header("⚙️ 상세 설정")
+    st.header("⚙️ 사이드바 이슈 검색")
 
     # Label과 Value를 매핑할 딕셔너리 생성 (원하는 이모지도 넣을 수 있습니다!)
     domain_mapping = {
@@ -170,9 +170,14 @@ with st.sidebar:
                 fetch_issues(payload=input_data)
         else:
             # 에러 메시지를 띄우고 함수 실행을 멈춤
-            st.error(
-                "❌ 등록되지 않거나 잘못된 국가명입니다. 정확한 국가명이나 코드를 입력해주세요."
+            st.session_state.messages.append(
+                {
+                    "role": "assistant",
+                    "type": "error",
+                    "content": "등록되지 않거나 잘못된 국가명입니다. 정확한 국가명(예: 대한민국)과 관심 분야(경제/문화/교육/과학/방산)를 입력해주세요.",
+                }
             )
+            st.rerun()  # 에러 메시지 띄우고 즉시 종료
 
         # 작업 완료 후 상태 복구 및 리런
         st.session_state.is_processing = False
@@ -194,7 +199,7 @@ for message in st.session_state.messages:
             st.warning(f"⚠️ {message['content']}")
 
         elif message.get("type") == "error":
-            st.error("🚨 message['content']")
+            st.error(f"🚨 {message['content']}")
 
         else:
             st.markdown(message["content"])
@@ -230,7 +235,25 @@ if prompt := st.chat_input(
                 # 의도 분석 결과가 나오면 사이드바 값을 즉시 업데이트!
                 if "intent_classify" in event:
                     intent_data = event["intent_classify"]
-                    updates = {}  # 업데이트할 내용 담을 딕셔너리
+
+                    # 🚨 사용자가 엉뚱한 말을 해서 국가가 추출되지 않은 경우
+                    raw_country = intent_data.get("country", "").strip()
+                    if not raw_country or raw_country.lower() in [
+                        "unknown",
+                        "none",
+                        "null",
+                    ]:
+                        st.session_state.messages.append(
+                            {
+                                "role": "assistant",
+                                "type": "error",
+                                "content": "등록되지 않거나 잘못된 국가명입니다. 정확한 국가명(예: 대한민국)과 관심 분야(경제/문화/교육/과학/방산)를 입력해주세요.",
+                            }
+                        )
+                        st.rerun()  # 에러 메시지 띄우고 즉시 종료
+
+                    # 정상 추출 시 바구니(pending_updates)에 담기
+                    updates = {}
 
                     if "domain" in intent_data:
                         updates["sidebar_domain"] = intent_data["domain"]
@@ -273,11 +296,17 @@ if prompt := st.chat_input(
                         full_response += "\n".join(issues)
                         response_placeholder.markdown(full_response)
 
-                    # 국가 정보가 부족해 에러 메시지가 돌아온 경우
+                    # 🚨 국가 정보가 부족해 LLM이 폴백(Fallback) 메시지를 뱉은 경우
                     elif "messages" in result_data:
-                        error_msg = result_data["messages"][0][1]  # 에러 텍스트 추출
-                        response_placeholder.markdown(f"⚠️ {error_msg}")
-                        # 이 경우 interrupt가 발생하지 않으므로 여기서 루프 통과
+                        # 기존의 LLM 자유 응답(error_msg) 대신, 통일된 규격 에러 메시지로 덮어씌움!
+                        st.session_state.messages.append(
+                            {
+                                "role": "assistant",
+                                "type": "error",
+                                "content": "등록되지 않거나 잘못된 국가명입니다. 정확한 국가명(예: 대한민국)과 이슈 관심 분야(경제/문화/교육/과학/방산)를 입력해주세요.",
+                            }
+                        )
+                        st.rerun()  # 에러 메시지 띄우고 즉시 종료
 
                 if "__interrupt__" in event:
                     st.session_state.waiting_for_user = True
