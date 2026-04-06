@@ -416,11 +416,6 @@ def generate_single_image3(prompt: str, user_id: str) -> dict:
 
         # 그 외의 심각한 에러(예: API 키 오류 등)는 재시도하지 않고 바로 실패 반환
         return {"status": "error", "fallback_text": error_msg}
-        # return {
-        #     "status": "filtered",
-        #     "fallback_text": "안전 정책 또는 API 오류로 인해 이미지 생성이 차단되었습니다.",
-        #     "reason": f"Safety filters or API error: {e}",
-        # }
 
 
 # Cloudflare D1의 REST API와 통신하는 커스텀 클래스

@@ -1,6 +1,9 @@
+import base64
+import os
 import uuid
 
 import streamlit as st
+import streamlit.components.v1 as components
 from agent import run_geo_agent
 from tools import get_domain_keyword, get_global_country_map
 
@@ -18,6 +21,19 @@ def show_starter_guide():
             """,
         }
     ]
+
+
+def get_image_base64(img_path):
+    """로컬 이미지를 HTML에서 띄우기 위해 Base64로 변환하거나 URL을 그대로 반환합니다."""
+    if not img_path:
+        return ""
+    if img_path.startswith("http"):  # 웹 URL인 경우 그대로 반환
+        return img_path
+    elif os.path.exists(img_path):  # 로컬 파일인 경우 Base64 인코딩
+        with open(img_path, "rb") as f:
+            data = f.read()
+        return f"data:image/jpeg;base64,{base64.b64encode(data).decode()}"
+    return ""
 
 
 # 세션 초기화
@@ -196,7 +212,7 @@ for message in st.session_state.messages:
             st.image(message["path"])
 
         elif message.get("type") == "warning":
-            st.warning(f"⚠️ {message['content']}")
+            st.warning(f"⚠️ {message['content']}\n\n{message['title']}")
 
         elif message.get("type") == "error":
             st.error(f"🚨 {message['content']}")
@@ -422,21 +438,81 @@ def generate_images():
                         error_message = (
                             res.get("text") or "알 수 없는 오류가 발생했습니다."
                         )
+                        print(f"⚠️ 웹툰 생성 실패: {error_message}")
+
                         st.session_state.messages.append(
                             {
                                 "role": "assistant",
                                 "type": "warning",
                                 "title": issue_title,
-                                "content": error_message,
+                                "content": "현재 선택하신 이슈는 시각화 정책 또는 시스템 과부화로 인해 웹툰 생성이 제한되었습니다.",
                             }
                         )
 
 
 if st.session_state.start_generation:
-    with st.spinner("Gemini Flash 3.1 모델이 이미지를 그리고 있습니다..."):
+    # 🚨 1. 세션에 저장된 대화 기록 중 '이미지'만 필터링해서 가져옵니다.
+    existing_images = [
+        msg for msg in st.session_state.messages if msg.get("type") == "image"
+    ]
+
+    # 🚨 2. 기존에 생성된 이미지가 1개라도 있다면 HTML/JS 슬라이드쇼를 띄웁니다!
+    if existing_images:
+        st.info("💡 **Tip:** 새로운 웹툰이 그려지는 동안 기존 작품들을 감상해 보세요!")
+
+        slides_html = ""
+        for i, msg in enumerate(existing_images):
+            # 첫 번째 이미지만 보이게 하고 나머지는 숨김 처리
+            display = "block" if i == 0 else "none"
+            img_src = get_image_base64(msg["path"])
+
+            if img_src:
+                slides_html += f"""
+                <div class="auto-slide" style="display: {display}; text-align: center; animation: fade 1.5s;">
+                    <img src="{img_src}" style="max-height: 400px; max-width: 100%; border-radius: 12px; box-shadow: 0 4px 12px rgba(0,0,0,0.15);">
+                    <div style="margin-top: 15px; font-weight: bold; font-size: 1.0em; color: #444;">
+                        {msg["title"]}
+                    </div>
+                </div>
+                """
+
+        # 🚨 순수 CSS + JS로 파이썬이 멈춰있어도 브라우저에서 알아서 3초마다 넘어갑니다!
+        html_code = f"""
+        <style>
+        @keyframes fade {{
+            from {{opacity: .4}} 
+            to {{opacity: 1}}
+        }}
+        </style>
+        <div style="width: 100%; max-width: 600px; margin: 0 auto; padding: 10px; position: relative;">
+            {slides_html}
+        </div>
+        <script>
+            let slideIndex = 0;
+            const slides = document.querySelectorAll('.auto-slide');
+            if (slides.length > 1) {{
+                setInterval(() => {{
+                    slides[slideIndex].style.display = 'none';
+                    slideIndex = (slideIndex + 1) % slides.length;
+                    slides[slideIndex].style.display = 'block';
+                }}, 3000); // 3000ms = 3초마다 슬라이드 전환
+            }}
+        </script>
+        """
+        # 독립된 iframe 컴포넌트로 화면에 렌더링 (높이 여유 있게 설정)
+        components.html(html_code, height=525)
+
+    # 🚨 3. 슬라이드쇼가 브라우저에서 도는 동안 파이썬은 열심히 스피너와 함께 이미지를 생성합니다.
+    selected_issue = (
+        st.session_state["country_input"]
+        + "의 "
+        + get_domain_keyword(st.session_state["sidebar_domain"])
+        + " 이슈"
+    )
+    with st.spinner(f"{selected_issue}에 대한 웹툰 이미지를 그리고 있습니다..."):
         generate_images()
 
-    # 🚨 작업 완료 후, 상태 복구 및 리런하여 UI 잠금 해제
+    # 작업 완료 후, 상태 복구 및 리런하여 UI 잠금 해제
     st.session_state.is_processing = False
     st.session_state.start_generation = False
     st.rerun()
