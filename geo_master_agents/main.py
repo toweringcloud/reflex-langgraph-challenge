@@ -498,10 +498,7 @@ if st.session_state.start_generation:
         components.html(html_code, height=525)
 
     # 🚨 3. 슬라이드쇼가 브라우저에서 도는 동안 파이썬은 열심히 스피너와 함께 이미지를 생성합니다.
-    country_name = st.session_state.get("country_input", "선택 국가")
-    target_info = f"{country_name}의 이슈"
-
-    with st.spinner(f"{target_info}에 대한 웹툰 이미지를 그리고 있습니다..."):
+    with st.spinner("선택한 이슈의 웹툰 이미지를 그리고 있습니다..."):
         generate_images()
 
     # 작업 완료 후, 상태 복구 및 리런하여 UI 잠금 해제
