@@ -25,6 +25,8 @@ from openai import OpenAI
 from PIL import Image, ImageDraw, ImageFont
 from tenacity import retry, stop_after_attempt, wait_exponential
 from utils import (
+    GEO_ALIASES,
+    GEO_METADATA,
     generate_cache_key_for_search,
     get_image_url,
     get_kv_cache,
@@ -38,22 +40,6 @@ load_dotenv()
 
 # 로깅 설정 (재시도 상황을 터미널에서 보기 위함)
 logger = logging.getLogger(__name__)
-
-
-def log_retry_attempt(retry_state):
-    logger.warning(
-        f"⚠️ Gemini API 503 지연 발생! {retry_state.attempt_number}번째 재시도 중... "
-        f"(대기 시간: {retry_state.idle_for}초)"
-    )
-
-
-def handle_retry_error(retry_state):
-    """모든 재시도(4회) 실패 시 호출되는 콜백 함수"""
-    # 에이전트가 죽지 않도록, 실패했다는 '상태 정보'를 딕셔너리로 반환합니다.
-    return {
-        "status": "error",
-        "fallback_text": "🚦 구글 서버(Gemini)에 요청이 너무 많아 대기 시간이 초과되었습니다. 1~2분 뒤 다시 시도해 주세요!",
-    }
 
 
 # 지오 마스터 에이전트 전용 LLM 정의
@@ -87,40 +73,52 @@ def get_global_country_map():
 
     country_map = {}
     for country in pycountry.countries:
-        # 1. 한국어 이름 매핑
+        # 해당 국가의 지리 데이터 가져오기 (없으면 기본값 세팅)
+        geo_info = GEO_METADATA.get(
+            country.alpha_2, {"lat": 20.0, "lon": 0.0, "zoom": 1}
+        )
+
+        # UI나 Pydeck에서 쓰기 좋게 묶어줍니다.
+        country_data = {
+            "name": country.name,  # 공식 영문명
+            "alpha_2": country.alpha_2,  # 2자리 코드
+            "lat": geo_info["lat"],
+            "lon": geo_info["lon"],
+            "zoom": geo_info["zoom"],
+        }
+
+        # 한국어 이름 매핑
         ko_name = ko_lang.gettext(country.name)
-        country_map[ko_name.lower()] = country.name
+        country_map[ko_name.lower()] = country_data
 
-        # 2. 영어 기본 이름 매핑 (예: "united states", "south korea")
-        country_map[country.name.lower()] = country.name
+        # 영어 기본 이름 매핑 (예: "united states", "south korea")
+        country_map[country.name.lower()] = country_data
 
-        # 3. 2자리/3자리 국가 코드 매핑 (예: "us", "usa", "kr", "kor")
-        country_map[country.alpha_2.lower()] = country.name
-        country_map[country.alpha_3.lower()] = country.name
+        # 2자리/3자리 국가 코드 매핑 (예: "us", "usa", "kr", "kor")
+        country_map[country.alpha_2.lower()] = country_data
+        country_map[country.alpha_3.lower()] = country_data
 
-        # 4. 공식 명칭이 따로 있다면 그것도 추가 (예: "republic of korea")
+        # 공식 명칭이 따로 있다면 그것도 추가 (예: "republic of korea")
         if hasattr(country, "official_name"):
-            country_map[country.official_name.lower()] = country.name
+            country_map[country.official_name.lower()] = country_data
 
-    # 5. 사람들이 자주 쓰는 글로벌 통칭 및 약어 수동 보완
-    aliases = {
-        "대한민국": "Korea, Republic of",
-        "한국": "Korea, Republic of",
-        "남한": "Korea, Republic of",
-        "south korea": "Korea, Republic of",
-        "북한": "Democratic People's Republic of",
-        "north korea": "Democratic People's Republic of",
-        "미국": "United States",
-        "영국": "United Kingdom",
-        "러시아": "Russian Federation",
-        "호주": "Australia",
-        "뉴질랜드": "New Zealand",
-        "스위스": "Switzerland",
-    }
+    # 사람들이 자주 쓰는 글로벌 통칭 및 약어 수동 보완
+    for k, v in GEO_ALIASES.items():
+        target_key = v.lower()
 
-    # 수동 보완 데이터도 모두 소문자 키로 저장
-    for k, v in aliases.items():
-        country_map[k.lower()] = v
+        # v(예: "United States")를 소문자로 바꿔서 이미 만들어진 딕셔너리가 있는지 찾습니다.
+        if target_key in country_map:
+            # 문자열이 아니라, 찾아낸 딕셔너리 전체를 연결합니다!
+            country_map[k.lower()] = country_map[target_key]
+        else:
+            # 만약 못 찾는다면 에러 방지용 기본 딕셔너리를 넣어줍니다.
+            country_map[k.lower()] = {
+                "name": v,
+                "alpha_2": "",
+                "lat": 20.0,
+                "lon": 0.0,
+                "zoom": 1,
+            }
 
     return country_map
 
@@ -340,6 +338,22 @@ def generate_single_image2(prompt: str) -> dict:
             "fallback_text": "안전 정책 또는 API 오류로 인해 이미지 생성이 차단되었습니다.",
             "reason": f"Safety filters or API error: {e}",
         }
+
+
+def log_retry_attempt(retry_state):
+    logger.warning(
+        f"⚠️ Gemini API 503 지연 발생! {retry_state.attempt_number}번째 재시도 중... "
+        f"(대기 시간: {retry_state.idle_for}초)"
+    )
+
+
+def handle_retry_error(retry_state):
+    """모든 재시도(4회) 실패 시 호출되는 콜백 함수"""
+    # 에이전트가 죽지 않도록, 실패했다는 '상태 정보'를 딕셔너리로 반환합니다.
+    return {
+        "status": "error",
+        "fallback_text": "🚦 구글 서버(Gemini)에 요청이 너무 많아 대기 시간이 초과되었습니다. 1~2분 뒤 다시 시도해 주세요!",
+    }
 
 
 # Tool 2c: 이미지 생성 (Nano Banana 2 활용) + R2 업로드 + D1 메타데이터 저장

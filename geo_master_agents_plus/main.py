@@ -9,6 +9,7 @@ import streamlit as st
 import streamlit.components.v1 as components
 from agent import run_geo_agent
 from tools import get_domain_keyword, get_global_country_map
+from utils import GEO_ALIASES_REVERSE
 
 st.set_page_config(page_title="지오 마스터 플러스", layout="wide")
 
@@ -86,7 +87,7 @@ def render_global_earthquake_map():
     )
 
     # 지도를 40도 기울여 3D 기둥이 잘 보이게 설정
-    view_state = pdk.ViewState(latitude=20, longitude=0, zoom=1.2, pitch=40)
+    # view_state = pdk.ViewState(latitude=20, longitude=0, zoom=1.2, pitch=40)
 
     # 대화형 툴팁 설정 (장소, 강도, 시간 표시)
     tooltip_content = {
@@ -99,10 +100,10 @@ def render_global_earthquake_map():
         },
     }
 
-    # 최종 Deck 객체 생성
+    # 고정된 view_state 대신 세션 상태에 저장된 값을 사용합니다.
     r = pdk.Deck(
         layers=[base_map_layer, earthquake_column_layer],
-        initial_view_state=view_state,
+        initial_view_state=st.session_state.map_view_state,  # ✅ 동적 업데이트 반영
         tooltip=tooltip_content,
         map_provider="carto",  # 깔끔한 지도 스타일 적용
         map_style="light",
@@ -130,8 +131,9 @@ def show_starter_guide():
             "role": "assistant",
             "content": """
                 안녕하세요! 어떤 국가의 어떤 분야 이슈가 궁금하세요?
-                - 사이드 바 : 분야 (경제/문화/교육/과학/방산) 선택 -> 국가 입력 -> 기간 선택 -> 이슈 검색 시작 -> Top 5 이슈 조회 -> 이슈 선택 -> 웹툰 생성
-                - 챗 입력창 : 분야와 국가 입력 (예: 한국의 최근 30년 경제 이슈를 알려줘) -> 엔터 -> Top 5 이슈 조회 -> 이슈 선택 -> 웹툰 생성
+                - 사이드 바 : 국가 명을 입력하고, 분야(경제/문화/교육/과학/방산)와 기간을 선택해 주세요.
+                - 챗 입력창 : 국가 + 분야 + 기간(옵셔널임, 기본값: 10년)을 포함하여 입력해 주세요.
+                - 지도 모드 : 아래의 지도를 클릭하면 해당 국가의 분야별 검색 이력을 확인할 수 있어요! (Comming Soon)
             """,
         },
         # 안내 문구 바로 아래에 지도를 띄우기 위한 특수 메시지 추가!
@@ -182,6 +184,12 @@ if "sidebar_country" not in st.session_state:
 if "sidebar_years" not in st.session_state:
     st.session_state.sidebar_years = 10
 
+# 앱이 리런될 때마다 이 기본값으로 초기화되지 않고 유지됩니다.
+if "map_view_state" not in st.session_state:
+    st.session_state.map_view_state = pdk.ViewState(
+        latitude=36.5, longitude=127.5, zoom=6, pitch=45
+    )
+
 # 하단에서 올라온 업데이트 명령을 최상단에서 적용!
 if "pending_updates" in st.session_state:
     for key, value in st.session_state.pending_updates.items():
@@ -223,7 +231,7 @@ with st.sidebar:
     # Number input도 초기값을 value로 주입합니다.
     years = st.number_input(
         "검색 기간(년)",
-        min_value=1,
+        min_value=10,
         max_value=100,
         key="sidebar_years",
         disabled=st.session_state.is_processing,
@@ -279,15 +287,23 @@ with st.sidebar:
     if st.session_state.start_search:
         # 버튼을 누른 순간, 프론트엔드에서 1차 검증 및 치환을 수행합니다!
         country_map = get_global_country_map()
-        input_lower = country_input.strip().lower()
+        user_input = country_input.strip().lower()
 
-        if input_lower in country_map:
+        if user_input in country_map:
             # 정상적인 경우, 공식 명칭으로 치환해서 백엔드(agent)로 넘김!
-            target_country = country_map[input_lower]
+            coords = country_map[user_input]
+
+            # 사이드바에서 검색할 때도 지도가 해당 국가로 줌인되도록!
+            st.session_state.map_view_state = pdk.ViewState(
+                latitude=coords["lat"],
+                longitude=coords["lon"],
+                zoom=coords["zoom"],
+                pitch=45,
+            )
 
             input_data = {
                 "country_input": country_input,  # 유저가 입력한 원본 텍스트
-                "country": target_country,  # 치환된 영문 명칭
+                "country": coords["name"],  # 치환된 영문 명칭
                 "years": years,
                 "domain": domain,
             }
@@ -392,20 +408,25 @@ if prompt := st.chat_input(
 
                     if "country" in intent_data:
                         raw_country = intent_data["country"]
-                        reverse_country_map = {
-                            "Korea, Republic of": "한국",
-                            "Democratic People's Republic of": "북한",
-                            "United States": "미국",
-                            "United Kingdom": "영국",
-                            "Russian Federation": "러시아",
-                            "Australia": "호주",
-                            "New Zealand": "뉴질랜드",
-                            "Switzerland": "스위스",
-                        }
-                        display_country = reverse_country_map.get(
+                        display_country = GEO_ALIASES_REVERSE.get(
                             raw_country, raw_country
                         )
                         updates["sidebar_country"] = display_country
+
+                        # 지도 좌표 업데이트를 위해 국가명으로 검색
+                        country_map = get_global_country_map()
+                        search_key = raw_country.strip().lower()
+
+                        if search_key in country_map:
+                            coords = country_map[search_key]
+
+                            # 세션의 뷰 상태를 해당 국가 좌표로 교체!
+                            st.session_state.map_view_state = pdk.ViewState(
+                                latitude=coords["lat"],
+                                longitude=coords["lon"],
+                                zoom=coords["zoom"],
+                                pitch=45,
+                            )
 
                     # 바구니를 통째로 세션에 저장!
                     if updates:
@@ -564,12 +585,12 @@ def generate_images():
 
 
 if st.session_state.start_generation:
-    # 🚨 1. 세션에 저장된 대화 기록 중 '이미지'만 필터링해서 가져옵니다.
+    # 세션에 저장된 대화 기록 중 '이미지'만 필터링해서 가져옵니다.
     existing_images = [
         msg for msg in st.session_state.messages if msg.get("type") == "image"
     ]
 
-    # 🚨 2. 기존에 생성된 이미지가 1개라도 있다면 HTML/JS 슬라이드쇼를 띄웁니다!
+    # 기존에 생성된 이미지가 1개라도 있다면 HTML/JS 슬라이드쇼를 띄웁니다!
     if existing_images:
         st.info("💡 **Tip:** 새로운 웹툰이 그려지는 동안 기존 작품들을 감상해 보세요!")
 
@@ -589,7 +610,7 @@ if st.session_state.start_generation:
                 </div>
                 """
 
-        # 🚨 순수 CSS + JS로 파이썬이 멈춰있어도 브라우저에서 알아서 3초마다 넘어갑니다!
+        # 순수 CSS + JS로 파이썬이 멈춰있어도 브라우저에서 알아서 3초마다 넘어갑니다!
         html_code = f"""
         <style>
         @keyframes fade {{
@@ -615,7 +636,7 @@ if st.session_state.start_generation:
         # 독립된 iframe 컴포넌트로 화면에 렌더링 (높이 여유 있게 설정)
         components.html(html_code, height=525)
 
-    # 🚨 3. 슬라이드쇼가 브라우저에서 도는 동안 파이썬은 열심히 스피너와 함께 이미지를 생성합니다.
+    # 슬라이드쇼가 브라우저에서 도는 동안 파이썬은 열심히 스피너와 함께 이미지를 생성합니다.
     with st.spinner("선택한 이슈의 웹툰 이미지를 그리고 있습니다..."):
         generate_images()
 
