@@ -1,3 +1,4 @@
+import base64
 import hashlib
 import json
 import os
@@ -410,7 +411,7 @@ def insert_cartoon_info(prompt: str, image_url: str, issue_id: int):
         print(f"💥 [D1 통신 에러] HTTP {response.status_code}: {response.text}")
 
 
-def get_country_search_generation_volume() -> list:
+def get_country_map_statistics() -> list:
     """국가별 이슈 검색량 + 카툰 생성량을 DB에서 조회합니다."""
 
     url = f"{CF_REST_API_URL}/{CF_ACCOUNT_ID}/d1/database/{os.getenv('CF_D1_DATABASE_ID')}/query"
@@ -517,3 +518,16 @@ def get_image_url(file_name: str, public_domain: str = None) -> str:
     except ClientError as e:
         print(f"❌ URL 생성 실패: {e}")
         return ""
+
+
+def get_image_base64(img_path):
+    """로컬 이미지를 HTML에서 띄우기 위해 Base64로 변환하거나 URL을 그대로 반환합니다."""
+    if not img_path:
+        return ""
+    if img_path.startswith("http"):  # 웹 URL인 경우 그대로 반환
+        return img_path
+    elif os.path.exists(img_path):  # 로컬 파일인 경우 Base64 인코딩
+        with open(img_path, "rb") as f:
+            data = f.read()
+        return f"data:image/jpeg;base64,{base64.b64encode(data).decode()}"
+    return ""

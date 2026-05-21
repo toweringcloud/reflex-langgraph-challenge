@@ -1,5 +1,3 @@
-import base64
-import os
 import uuid
 
 import pandas as pd
@@ -9,12 +7,15 @@ import streamlit as st
 import streamlit.components.v1 as components
 from agent import run_geo_agent
 from tools import (
+    get_country_map,
     get_domain_keyword,
-    get_global_country_map,
+    get_elevenlabs_stt,
+    get_elevenlabs_tts,
 )
 from utils import (
     GEO_ALIASES_REVERSE,
-    get_country_search_generation_volume,
+    get_country_map_statistics,
+    get_image_base64,
 )
 
 st.set_page_config(page_title="지오 마스터 플러스", layout="wide")
@@ -41,7 +42,7 @@ def render_country_data_map(custom_view_state=None):
     with st.spinner("국가별 이슈 데이터 로드 중..."):
         try:
             data_world, _ = fetch_geo_data()
-            country_data = get_country_search_generation_volume()
+            country_data = get_country_map_statistics()
         except Exception as e:
             st.info(f"⚠️ 국가별 데이터를 불러올 수 없습니다: {e}")
             return
@@ -240,25 +241,12 @@ def show_starter_guide():
                 안녕하세요! 어떤 국가의 어떤 분야 이슈가 궁금하세요?
                 - 사이드 바 : 국가 명을 입력하고, 분야(경제/문화/교육/과학/방산)와 기간을 선택해 주세요.
                 - 챗 입력창 : 국가 + 분야 + 기간(옵셔널임, 기본값: 10년)을 포함하여 입력해 주세요.
-                - 보이스 챗 : 음성으로 국가별 이슈 검색 이력을 확인할 수 있어요! (Comming Soon)
+                - 보이스 챗 : 음성으로 국가별 이슈를 검색 후, 생성된 카툰 설명을 들을 수 있어요.
             """,
         },
         # 안내 문구 바로 아래에 지도를 띄우기 위한 특수 메시지 추가!
-        {"role": "assistant", "type": "map"},
+        # {"role": "assistant", "type": "map"},
     ]
-
-
-def get_image_base64(img_path):
-    """로컬 이미지를 HTML에서 띄우기 위해 Base64로 변환하거나 URL을 그대로 반환합니다."""
-    if not img_path:
-        return ""
-    if img_path.startswith("http"):  # 웹 URL인 경우 그대로 반환
-        return img_path
-    elif os.path.exists(img_path):  # 로컬 파일인 경우 Base64 인코딩
-        with open(img_path, "rb") as f:
-            data = f.read()
-        return f"data:image/jpeg;base64,{base64.b64encode(data).decode()}"
-    return ""
 
 
 # 세션 초기화
@@ -425,7 +413,7 @@ with st.sidebar:
 
     if st.session_state.start_search:
         # 버튼을 누른 순간, 프론트엔드에서 1차 검증 및 치환을 수행합니다!
-        country_map = get_global_country_map()
+        country_map = get_country_map()
         user_input = country_input.strip().lower()
 
         if user_input in country_map:
@@ -481,6 +469,9 @@ for message in st.session_state.messages:
                 st.success(f"🎨 **새로운 웹툰이 완성되었습니다**\n\n{message['title']}")
             st.image(message["path"])
 
+            if message.get("audio"):
+                st.audio(message["audio"], format="audio/mpeg")
+
         elif message.get("type") == "map":
             render_country_data_map(custom_view_state=message.get("view_state"))
 
@@ -495,9 +486,41 @@ for message in st.session_state.messages:
 
 
 # 3. 사용자 입력 처리
-if prompt := st.chat_input(
+prompt = None
+
+with st.bottom:
+    # 음성 입력 위젯
+    audio_value = st.audio_input(
+        "🎙️ 음성으로 검색하기", disabled=st.session_state.is_processing
+    )
+
+    # 무한 루프 방지용 세션 초기화
+    if "last_processed_audio" not in st.session_state:
+        st.session_state.last_processed_audio = None
+
+    # 오디오 값이 존재하고 '새로운 녹음'일 때만 STT 실행 및 prompt 할당!
+    if audio_value is not None and audio_value != st.session_state.last_processed_audio:
+        st.session_state.last_processed_audio = audio_value  # 처리 완료 도장 쾅!
+
+        with st.spinner("음성을 텍스트로 변환 중..."):
+            # 음성 인식 (STT) 결과를 prompt에 저장
+            stt_result = get_elevenlabs_stt(audio_value)
+            if stt_result:
+                prompt = stt_result  # 성공 시 prompt에 텍스트 장전
+            else:
+                st.warning("음성 인식에 실패했습니다. 다시 시도해 주세요.")
+
+# 텍스트 입력 위젯
+text_prompt = st.chat_input(
     "예: 한국의 경제 이슈를 알려줘", disabled=st.session_state.is_processing
-):
+)
+
+# 텍스트 입력이 있으면 텍스트가 우선권을 가짐
+if text_prompt:
+    prompt = text_prompt
+
+# prompt에 값이 채워져 있을 때만(새 음성이거나 새 텍스트일 때만) 에이전트 실행
+if prompt:
     st.session_state.thread_id = str(uuid.uuid4())
 
     # 사이드바와 동일하게 새로운 검색 시작 시 기존 상태 초기화!
@@ -566,7 +589,7 @@ if prompt := st.chat_input(
                         updates["sidebar_country"] = display_country
 
                         # 지도 좌표 업데이트를 위해 국가명으로 검색
-                        country_map = get_global_country_map()
+                        country_map = get_country_map()
                         search_key = raw_country.strip().lower()
 
                         if search_key in country_map:
@@ -736,6 +759,9 @@ def generate_images():
                         img_path = res.get("file") or res.get("url")
                         is_cached = res.get("is_cached", False)
 
+                        # 🗣️ 이슈 설명을 AI 보이스 (TTS)로 출력
+                        tts_audio = get_elevenlabs_tts(issue_title)
+
                         if img_path:
                             # 영구 보관용 세션 저장
                             st.session_state.messages.append(
@@ -758,6 +784,11 @@ def generate_images():
                                         f"🎨 **새로운 웹툰이 완성되었습니다**\n\n{issue_title}"
                                     )
                                 st.image(img_path)
+
+                            # 🗣️ 자동재생을 끄고, 개별 오디오 플레이어 위젯 배치
+                            if tts_audio:
+                                st.audio(tts_audio, format="audio/mpeg")
+
                         else:
                             st.session_state.messages.append(
                                 {

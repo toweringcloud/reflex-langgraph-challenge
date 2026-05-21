@@ -4,13 +4,13 @@ import uuid
 from typing import Annotated, Any, List, TypedDict
 
 from langchain_core.runnables import RunnableConfig
-from langchain_google_genai import ChatGoogleGenerativeAI
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command, Send, interrupt
 from pydantic import BaseModel, Field
 from tools import (
     CloudflareD1Saver,
     generate_single_image,
+    get_llm_client,
     get_refined_issues,
 )
 from utils import (
@@ -58,7 +58,7 @@ class UserIntent(BaseModel):
 def classify_user_intent_node(state: AgentState):
     """단계 0: 사용자 의도 분석"""
 
-    llm = ChatGoogleGenerativeAI(model="gemini-2.0-flash", temperature=0)
+    llm = get_llm_client()
     structured_llm = llm.with_structured_output(UserIntent)
 
     messages = state.get("messages", [])

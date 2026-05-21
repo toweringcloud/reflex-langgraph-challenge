@@ -12,8 +12,10 @@ import requests
 from dotenv import load_dotenv
 from google import genai
 from google.genai import types
+from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import HumanMessage
 from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_openai import ChatOpenAI
 from langchain_tavily import TavilySearch
 from langgraph.checkpoint.base import (
     BaseCheckpointSaver,
@@ -41,12 +43,29 @@ load_dotenv()
 logger = logging.getLogger(__name__)
 
 
-# 지오 마스터 에이전트 전용 LLM 정의 (Gemini 기반)
-llm = ChatGoogleGenerativeAI(
-    model="gemini-2.0-flash",
-    temperature=0,  # 추론의 일관성을 위해 0으로 설정
-    max_retries=2,  # API 호출 실패 시 재시도 횟수
-)
+def get_llm_client():
+    """LLM 인스턴스를 반환하는 헬퍼 함수 (필요 시 모델이나 설정을 동적으로 변경 가능)"""
+    llm_provider = os.getenv("LLM_PROVIDER")
+    llm = None
+
+    if llm_provider == "google":
+        # llm = ChatGoogleGenerativeAI(model="gemini-3.5-flash", temperature=0)
+        # llm = ChatGoogleGenerativeAI(model="gemini-3.1-flash-lite", temperature=0)
+        llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash", temperature=0)
+    elif llm_provider == "anthropic":
+        # llm = ChatAnthropic(model="claude-opus-4.5", temperature=0)
+        # llm = ChatAnthropic(model="claude-sonnet-4.5", temperature=0)
+        llm = ChatAnthropic(model="claude-haiku-4.5", temperature=0)
+    else:
+        llm = ChatOpenAI(model="gpt-5-nano", temperature=0)
+        # llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
+        # llm = ChatOpenAI(model="gpt-3.5-turbo", temperature=0)
+
+    return llm
+
+
+# 지오 마스터 에이전트 전용 LLM 정의
+llm = get_llm_client()
 
 
 def get_domain_keyword(input: str) -> str:
@@ -61,7 +80,7 @@ def get_domain_keyword(input: str) -> str:
     return domain_keywords.get(input, "교육")
 
 
-def get_global_country_map():
+def get_country_map():
     """
     pycountry를 기반으로 '한글/영문/국가코드/통칭 -> 영어 공식 국가명'
     통합 맵핑 딕셔너리를 생성합니다. (대소문자 무시를 위해 모든 키를 소문자로 저장)
@@ -229,8 +248,21 @@ def get_refined_issues(
     response = llm.invoke([HumanMessage(content=prompt)])
 
     # Step D: 결과 파싱 및 리스트화
-    issues = [line.strip() for line in response.content.split("\n") if line.strip()]
-    # return [issues[:10], issue_ids]
+    raw_content = response.content
+
+    # 1. Gemini가 리스트 형태로 반환할 경우 텍스트만 안전하게 추출
+    if isinstance(raw_content, list):
+        text_content = "\n".join(
+            [
+                item.get("text", "") if isinstance(item, dict) else str(item)
+                for item in raw_content
+            ]
+        )
+    else:
+        text_content = str(raw_content)
+
+    # 2. 추출된 문자열을 기반으로 리스트 생성
+    issues = [line.strip() for line in text_content.split("\n") if line.strip()]
     return issues[:10]
 
 
@@ -265,12 +297,13 @@ def generate_single_image(prompt: str, issue_id: int) -> dict:
     """
     Nano Banana를 사용하여 한글이 포함된 고해상도 교육 삽화를 생성합니다.
     """
-    client = genai.Client(api_key=os.getenv("GOOGLE_VERTEX_API_KEY"))
+    client = genai.Client(api_key=os.getenv("GOOGLE_API_KEY"))
 
     models = (
         "nano-banana-pro-preview",
         "gemini-3.1-pro-image-preview",
         "gemini-3.1-flash-image-preview",
+        "gemini-2.5-flash-image-preview",
     )
     selected_model = f"models/{models[2]}"
 
@@ -398,6 +431,60 @@ def generate_single_image2(prompt: str) -> dict:
             "fallback_text": "안전 정책 또는 API 오류로 인해 이미지 생성이 차단되었습니다.",
             "reason": f"Safety filters or API error: {e}",
         }
+
+
+def get_elevenlabs_stt(audio_file) -> str:
+    """ElevenLabs API(Scribe)를 사용하여 음성을 텍스트로 변환(STT)합니다."""
+    api_key = os.getenv("ELEVENLABS_API_KEY")
+    if not api_key:
+        print("ELEVENLABS_API_KEY가 설정되지 않았습니다.")
+        return None
+
+    url = "https://api.elevenlabs.io/v1/speech-to-text"
+    headers = {"xi-api-key": api_key}
+    data = {"model_id": "scribe_v1", "language_code": "ko"}
+    files = {"file": ("audio.wav", audio_file, "audio/wav")}
+
+    try:
+        response = requests.post(url, headers=headers, data=data, files=files)
+        if response.status_code == 200:
+            return response.json().get("text")
+        else:
+            print(f"ElevenLabs STT 에러: {response.text}")
+            return None
+    except Exception as e:
+        print(f"STT 통신 에러: {e}")
+        return None
+
+
+def get_elevenlabs_tts(text: str) -> bytes:
+    """ElevenLabs API를 사용하여 텍스트를 음성(MP3) 바이트로 변환(TTS)합니다."""
+    api_key = os.getenv("ELEVENLABS_API_KEY")
+    if not api_key:
+        return None
+
+    # 원하는 다국어 지원 보이스 ID로 변경 가능 (default: Rachel)
+    voice_id = os.getenv("ELEVENLABS_VOICE_ID")
+    url = f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}"
+
+    headers = {
+        "Accept": "audio/mpeg",
+        "Content-Type": "application/json",
+        "xi-api-key": api_key,
+    }
+    data = {
+        "text": text,
+        "model_id": "eleven_multilingual_v2",
+        "voice_settings": {"stability": 0.5, "similarity_boost": 0.75},
+    }
+
+    try:
+        response = requests.post(url, json=data, headers=headers)
+        if response.status_code == 200:
+            return response.content
+        return None
+    except Exception:
+        return None
 
 
 # Cloudflare D1의 REST API와 통신하는 커스텀 클래스

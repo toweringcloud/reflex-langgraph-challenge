@@ -16,6 +16,7 @@ dependencies = [
     "openai>=2.23.0",
     "openai-agents[viz]>=0.10.3",
     "langchain>=1.2.13",
+    "langchain-anthropic>=1.4.3",
     "langchain-google-genai>=4.2.2",
     "langchain-openai>=1.1.12",
     "langchain-tavily>=0.2.17",
