@@ -36,7 +36,7 @@ def fetch_geo_data():
     return data_world
 
 
-def render_country_data_map():
+def render_country_data_map(custom_view_state=None):
     """국가별 이슈 검색량 + 카툰 생성량을 pydeck 맵에 렌더링합니다."""
     with st.spinner("국가별 이슈 데이터 로드 중..."):
         try:
@@ -102,9 +102,14 @@ def render_country_data_map():
         },
     }
 
+    # 🚨 과거 좌표가 전달되면 그걸 쓰고, 아니면 현재 세션 좌표를 씁니다.
+    active_view_state = (
+        custom_view_state if custom_view_state else st.session_state.map_view_state
+    )
+
     r = pdk.Deck(
         layers=[base_map_layer, search_layer, generation_layer],
-        initial_view_state=st.session_state.map_view_state,
+        initial_view_state=active_view_state,
         tooltip=tooltip_content,
         map_provider="carto",
         map_style="light",
@@ -386,11 +391,15 @@ with st.sidebar:
                 found_issues = search_result.get("issue_list", [])
                 st.session_state.issues = found_issues
 
-                # ⚠️ 검색된 이슈가 존재한다면 지도를 먼저 보여주기 위해 상태 주입
-                # if found_issues:
-                #     st.session_state.messages.append(
-                #         {"role": "assistant", "type": "map"}
-                #     )
+                # 🚨 지도 메시지를 저장할 때 view_state(현재 시점의 지도 좌표)도 함께 저장
+                if found_issues:
+                    st.session_state.messages.append(
+                        {
+                            "role": "assistant",
+                            "type": "map",
+                            "view_state": st.session_state.map_view_state,
+                        }
+                    )
 
                 target_info = f"{payload['country_input']}의 {get_domain_keyword(payload['domain'])} 이슈"
                 full_response = (
@@ -473,8 +482,7 @@ for message in st.session_state.messages:
             st.image(message["path"])
 
         elif message.get("type") == "map":
-            # render_global_earthquake_map()
-            render_country_data_map()
+            render_country_data_map(custom_view_state=message.get("view_state"))
 
         elif message.get("type") == "warning":
             st.warning(f"⚠️ {message['content']}\n\n{message['title']}")
@@ -491,6 +499,13 @@ if prompt := st.chat_input(
     "예: 한국의 경제 이슈를 알려줘", disabled=st.session_state.is_processing
 ):
     st.session_state.thread_id = str(uuid.uuid4())
+
+    # 사이드바와 동일하게 새로운 검색 시작 시 기존 상태 초기화!
+    st.session_state.is_processing = True
+    st.session_state.waiting_for_user = False
+    st.session_state.start_generation = False
+    st.session_state.issues = []
+    st.session_state.selected_indices = []
 
     # 유저 메시지 표시 및 저장
     st.session_state.messages.append({"role": "user", "content": prompt})
@@ -596,6 +611,14 @@ if prompt := st.chat_input(
                             else:
                                 st.session_state.issues = found_issues
 
+                        st.session_state.issues = issues
+
+                        # 실시간 스트리밍 시, 현재 뷰 상태를 넘겨서 렌더링
+                        with map_placeholder:
+                            render_country_data_map(
+                                custom_view_state=st.session_state.map_view_state
+                            )
+
                         full_response = (
                             f"🔍 **{prompt}**에 대한 히스토리 분석 결과입니다:\n\n"
                         )
@@ -617,8 +640,14 @@ if prompt := st.chat_input(
                 if "__interrupt__" in event:
                     st.session_state.waiting_for_user = True
 
-        # 🚨 루프 완료 후 세션 저장소에도 지도가 먼저 나오도록 순서대로 추가
-        st.session_state.messages.append({"role": "assistant", "type": "map"})
+        # 루프 완료 후 세션 저장소에도 지도가 먼저 나오도록 순서대로 추가
+        st.session_state.messages.append(
+            {
+                "role": "assistant",
+                "type": "map",
+                "view_state": st.session_state.map_view_state,  # 현재 시점의 지도 좌표 캡처
+            }
+        )
         st.session_state.messages.append(
             {"role": "assistant", "content": full_response}
         )

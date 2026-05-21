@@ -150,13 +150,11 @@ def get_refined_issues(
     cache_val = get_kv_cache(cache_key)
 
     if isinstance(cache_val, list):
-        # 캐시된 데이터가 이미 리스트 형태로 저장되어 있는 경우 (최적화된 케이스)
-        # search_results, issue_ids = cache_val
         row = json.loads(cache_val[0]) if len(cache_val) > 0 else None
     else:
-        row = json.loads(cache_val) if cache_val else None
+        row = cache_val
 
-    # issue_ids = []
+    search_results = []
 
     if row:
         print(f"\n⚡ [Cache Hit] '{cache_key}' 조건의 캐시된 검색 결과를 불러옵니다.")
@@ -193,17 +191,7 @@ def get_refined_issues(
         )
         search_results = search_tool.invoke({"query": search_query})
 
-        # 검색 트렌드 분석을 위해 이력 테이블에도 저장
-        # if isinstance(search_results, list):
-        #     for issue in search_results:
-        #         year = re.search(r"^(\d{4})", issue)
-        #         issue_id = insert_issue_info(domain, country, year, issue, user_id)
-        #         issue_ids.append(issue_id)
-
-        # 검색 결과를 JSON 문자열로 변환하여 DB에 저장
-        # set_kv_cache(cache_key, json.dumps([search_results, issue_ids]))
-
-        # 🚨 불필요한 DB 저장 로직 제거! 순수하게 Tavily 검색 결과만 캐싱합니다.
+        # 순수하게 Tavily 검색 결과만 캐싱합니다.
         set_kv_cache(cache_key, search_results)
 
     # Step C: 검색 결과 정리 with 데이터 타입 체크
@@ -277,7 +265,7 @@ def generate_single_image(prompt: str, issue_id: int) -> dict:
     """
     Nano Banana를 사용하여 한글이 포함된 고해상도 교육 삽화를 생성합니다.
     """
-    client = genai.Client()
+    client = genai.Client(api_key=os.getenv("GOOGLE_VERTEX_API_KEY"))
 
     models = (
         "nano-banana-pro-preview",
@@ -343,7 +331,7 @@ def generate_single_image2(prompt: str) -> dict:
     """
     Imagen으로 배경 이미지를 생성하고, Pillow로 한글 타이틀을 완벽하게 합성합니다.
     """
-    client = genai.Client()
+    client = genai.Client(api_key=os.getenv("GOOGLE_VERTEX_API_KEY"))
 
     models = (
         "imagen-4.0-ultra-generate-001",
