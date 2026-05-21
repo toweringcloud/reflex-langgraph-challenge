@@ -3,6 +3,7 @@ import json
 import os
 
 import boto3
+import pycountry
 import requests
 from botocore.exceptions import ClientError
 from dotenv import load_dotenv
@@ -281,6 +282,8 @@ GEO_ALIASES = {
     "호주": "Australia",
     "뉴질랜드": "New Zealand",
     "스위스": "Switzerland",
+    "이탈리아": "Italy",
+    "이태리": "Italy",
 }
 
 GEO_ALIASES_REVERSE = {
@@ -292,9 +295,11 @@ GEO_ALIASES_REVERSE = {
     "Australia": "호주",
     "New Zealand": "뉴질랜드",
     "Switzerland": "스위스",
+    "Italy": "이탈리아",
 }
 
 
+# --- Unique Hashed Key ---
 def generate_cache_key_for_search(domain, country, years):
     combined_str = f"{domain}_{country}_{years}"
     return hashlib.md5(combined_str.encode()).hexdigest()
@@ -305,7 +310,16 @@ def generate_cache_key_for_image(domain, country, year, issue_text):
     return hashlib.md5(combined_str.encode()).hexdigest()
 
 
-# --- 1. KV (검색 캐싱) ---
+# --- KV (Cache Server) ---
+def set_kv_cache(cache_key: str, data: dict):
+    url = f"{CF_REST_API_URL}/{CF_ACCOUNT_ID}/storage/kv/namespaces/{os.getenv('CF_KV_NAMESPACE_ID')}/values/{cache_key}"
+    headers = {
+        "Authorization": f"Bearer {CF_API_TOKEN}",
+        "Content-Type": "application/json",
+    }
+    requests.put(url, headers=headers, data=json.dumps(data))
+
+
 def get_kv_cache(cache_key: str):
     url = f"{CF_REST_API_URL}/{CF_ACCOUNT_ID}/storage/kv/namespaces/{os.getenv('CF_KV_NAMESPACE_ID')}/values/{cache_key}"
     headers = {"Authorization": f"Bearer {CF_API_TOKEN}"}
@@ -319,29 +333,146 @@ def get_kv_cache(cache_key: str):
     return None
 
 
-def set_kv_cache(cache_key: str, data: dict):
-    url = f"{CF_REST_API_URL}/{CF_ACCOUNT_ID}/storage/kv/namespaces/{os.getenv('CF_KV_NAMESPACE_ID')}/values/{cache_key}"
-    headers = {
-        "Authorization": f"Bearer {CF_API_TOKEN}",
-        "Content-Type": "application/json",
-    }
-    requests.put(url, headers=headers, data=json.dumps(data))
-
-
-# --- 2. D1 (메타데이터 저장용 REST API) ---
-def insert_image_metadata(user_id: str, prompt: str, image_url: str):
+# --- D1 (Relational Database) ---
+def insert_user_info(email: str, nickname: str):
     url = f"{CF_REST_API_URL}/{CF_ACCOUNT_ID}/d1/database/{os.getenv('CF_D1_DATABASE_ID')}/query"
     headers = {
         "Authorization": f"Bearer {CF_API_TOKEN}",
         "Content-Type": "application/json",
     }
-    sql = "INSERT INTO image_gallery (user_id, prompt, image_url) VALUES (?, ?, ?)"
+    sql = "INSERT INTO users (email, nickname) VALUES (?, ?)"
     requests.post(
-        url, headers=headers, json={"sql": sql, "params": [user_id, prompt, image_url]}
+        url,
+        headers=headers,
+        json={"sql": sql, "params": [email, nickname]},
     )
 
 
-# --- 3. R2 (이미지 업로드) ---
+def insert_issue_info(
+    domain: str, country: str, year: int, content: str, user_id: int | None = None
+):
+    url = f"{CF_REST_API_URL}/{CF_ACCOUNT_ID}/d1/database/{os.getenv('CF_D1_DATABASE_ID')}/query"
+    headers = {
+        "Authorization": f"Bearer {CF_API_TOKEN}",
+        "Content-Type": "application/json",
+    }
+    sql = "INSERT INTO issues (domain, country, year, content, user_id) VALUES (?, ?, ?, ?, ?) RETURNING id"
+
+    response = requests.post(
+        url,
+        headers=headers,
+        json={"sql": sql, "params": [domain, country, year, content, user_id]},
+    )
+
+    if response.status_code == 200:
+        try:
+            data = response.json()
+            if data.get("success"):
+                print(f"✅ [D1 저장 성공] Issues 테이블 (issue: {content})")
+            else:
+                print(f"🚨 [D1 쿼리 에러] Issues 테이블: {data.get('errors')}")
+
+            # Cloudflare D1 REST API 응답 구조 깊숙한 곳에서 id 꺼내기
+            inserted_id = data["result"][0]["results"][0]["id"]
+            print(f"⚠️ [D1 저장 성공] issue_id: {inserted_id})")
+            return inserted_id
+
+        except (KeyError, IndexError):
+            print(f"⚠️ ID 추출 실패 (응답 구조 확인 필요): {data}")
+            return None
+    else:
+        print(f"🚨 D1 API 호출 에러 ({response.status_code}): {response.text}")
+        return None
+
+
+def insert_cartoon_info(prompt: str, image_url: str, issue_id: int):
+    url = f"{CF_REST_API_URL}/{CF_ACCOUNT_ID}/d1/database/{os.getenv('CF_D1_DATABASE_ID')}/query"
+    headers = {
+        "Authorization": f"Bearer {CF_API_TOKEN}",
+        "Content-Type": "application/json",
+    }
+    sql = "INSERT INTO cartoons (issue_id, prompt, image_url) VALUES (?, ?, ?)"
+
+    response = requests.post(
+        url,
+        headers=headers,
+        json={"sql": sql, "params": [issue_id, prompt, image_url]},
+    )
+
+    # 🚨 조용히 실패하는 것을 막기 위한 로깅
+    if response.status_code == 200:
+        data = response.json()
+        if data.get("success"):
+            print(f"✅ [D1 저장 성공] Cartoons 테이블 (issue_id: {issue_id})")
+        else:
+            print(f"🚨 [D1 쿼리 에러] Cartoons 테이블: {data.get('errors')}")
+    else:
+        print(f"💥 [D1 통신 에러] HTTP {response.status_code}: {response.text}")
+
+
+def get_country_search_generation_volume() -> list:
+    """국가별 이슈 검색량 + 카툰 생성량을 DB에서 조회합니다."""
+
+    url = f"{CF_REST_API_URL}/{CF_ACCOUNT_ID}/d1/database/{os.getenv('CF_D1_DATABASE_ID')}/query"
+    headers = {
+        "Authorization": f"Bearer {CF_API_TOKEN}",
+        "Content-Type": "application/json",
+    }
+
+    sql = """
+    SELECT
+        i.country,
+        COUNT(DISTINCT i.id) AS search_volume,
+        COUNT(c.id) AS generation_volume
+    FROM
+        issues i
+    LEFT JOIN
+        cartoons c ON i.id = c.issue_id
+    GROUP BY
+        i.country
+    """
+
+    response = requests.post(
+        url,
+        headers=headers,
+        json={"sql": sql, "params": []},
+    )
+
+    data = []
+    if response.status_code == 200:
+        res_json = response.json()
+        if res_json.get("success") and res_json["result"][0]["results"]:
+            for row in res_json["result"][0]["results"]:
+                country_name = row.get("country", "")
+                search_vol = row.get("search_volume", 0)
+                gen_vol = row.get("generation_volume", 0)
+
+                if country_name:
+                    try:
+                        country_obj = pycountry.countries.search_fuzzy(country_name)[0]
+                        alpha_2 = country_obj.alpha_2
+                    except (LookupError, IndexError):
+                        alpha_2 = None
+
+                    if alpha_2 and alpha_2 in GEO_METADATA:
+                        geo_info = GEO_METADATA[alpha_2]
+                    else:
+                        geo_info = {"lat": 20.0, "lon": 0.0, "zoom": 1}
+
+                    data.append(
+                        {
+                            "country": country_name,
+                            "search_volume": search_vol,
+                            "generation_volume": gen_vol,
+                            "lat": geo_info["lat"],
+                            "lon": geo_info["lon"],
+                        }
+                    )
+
+    return data
+
+
+# --- R2 (File Storage) ---
 # S3 클라이언트를 R2 엔드포인트에 맞춰 초기화
 s3_client = boto3.client(
     "s3",

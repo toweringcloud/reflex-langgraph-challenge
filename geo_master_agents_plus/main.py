@@ -8,8 +8,14 @@ import requests
 import streamlit as st
 import streamlit.components.v1 as components
 from agent import run_geo_agent
-from tools import get_domain_keyword, get_global_country_map
-from utils import GEO_ALIASES_REVERSE
+from tools import (
+    get_domain_keyword,
+    get_global_country_map,
+)
+from utils import (
+    GEO_ALIASES_REVERSE,
+    get_country_search_generation_volume,
+)
 
 st.set_page_config(page_title="지오 마스터 플러스", layout="wide")
 
@@ -19,14 +25,103 @@ def fetch_geo_data():
     """세계 지도와 지진 데이터를 안전하게 불러옵니다."""
     # 🚨 반드시 raw 데이터를 반환하는 주소를 사용해야 합니다.
     worldmap_url = "https://raw.githubusercontent.com/datasets/geo-boundaries-world-110m/master/countries.geojson"
-    earthquake_url = (
-        "https://earthquake.usgs.gov/earthquakes/feed/v1.0/summary/2.5_week.geojson"
-    )
+    # earthquake_url = (
+    #     "https://earthquake.usgs.gov/earthquakes/feed/v1.0/summary/2.5_week.geojson"
+    # )
 
     data_world = requests.get(worldmap_url).json()
-    data_earthquake = requests.get(earthquake_url).json()
+    # data_earthquake = requests.get(earthquake_url).json()
 
-    return data_world, data_earthquake
+    # return data_world, data_earthquake
+    return data_world
+
+
+def render_country_data_map():
+    """국가별 이슈 검색량 + 카툰 생성량을 pydeck 맵에 렌더링합니다."""
+    with st.spinner("국가별 이슈 데이터 로드 중..."):
+        try:
+            data_world, _ = fetch_geo_data()
+            country_data = get_country_search_generation_volume()
+        except Exception as e:
+            st.info(f"⚠️ 국가별 데이터를 불러올 수 없습니다: {e}")
+            return
+
+    if not country_data:
+        st.info("📊 아직 수집된 국가별 데이터가 없습니다.")
+        return
+
+    df_country = pd.DataFrame(country_data)
+
+    # 레이어 1: 세계 지도 바탕
+    base_map_layer = pdk.Layer(
+        "GeoJsonLayer",
+        data_world,
+        opacity=0.3,
+        stroked=True,
+        filled=True,
+        get_fill_color=[220, 220, 220, 80],
+        get_line_color=[200, 200, 200, 150],
+        line_width_min_pixels=1,
+        pickable=False,
+    )
+
+    # 레이어 2: 이슈 검색량 (파란색 기둥)
+    search_layer = pdk.Layer(
+        "ColumnLayer",
+        df_country,
+        get_position="[lon, lat]",
+        get_elevation="search_volume * 5000",
+        elevation_scale=1,
+        radius=50000,
+        get_fill_color=[0, 100, 255, 180],
+        pickable=True,
+        auto_highlight=True,
+    )
+
+    # 레이어 3: 카툰 생성량 (주황색 기둥, 약간 오프셋)
+    generation_layer = pdk.Layer(
+        "ColumnLayer",
+        df_country,
+        get_position="[lon - 1, lat]",
+        get_elevation="generation_volume * 5000",
+        elevation_scale=1,
+        radius=50000,
+        get_fill_color=[255, 140, 0, 180],
+        pickable=True,
+        auto_highlight=True,
+    )
+
+    # 대화형 툴팁
+    tooltip_content = {
+        "html": "<b>{country}</b><br/>검색량: {search_volume}<br/>생성량: {generation_volume}",
+        "style": {
+            "background": "rgba(0,0,0,0.8)",
+            "color": "white",
+            "border-radius": "8px",
+            "padding": "10px",
+        },
+    }
+
+    r = pdk.Deck(
+        layers=[base_map_layer, search_layer, generation_layer],
+        initial_view_state=st.session_state.map_view_state,
+        tooltip=tooltip_content,
+        map_provider="carto",
+        map_style="light",
+    )
+
+    st.pydeck_chart(r)
+
+    # 범례 표시
+    st.markdown(
+        """
+    <div style="display: flex; gap: 30px; margin-top: 15px; font-size: 14px;">
+        <div><span style="background:#0064FF; width:20px; height:20px; display:inline-block; margin-right:8px;"></span>이슈 검색량</div>
+        <div><span style="background:#FF8C00; width:20px; height:20px; display:inline-block; margin-right:8px;"></span>카툰 생성량</div>
+    </div>
+    """,
+        unsafe_allow_html=True,
+    )
 
 
 def render_global_earthquake_map():
@@ -114,15 +209,22 @@ def render_global_earthquake_map():
 
 
 def show_global_map():
-    # 1. 지도를 그립니다. (샘플 테스트)
-    with st.container():
-        render_global_earthquake_map()
+    # 지도 타입 선택
+    map_type = st.radio(
+        "지도 유형 선택",
+        options=["국가별 이슈 데이터", "실시간 지진 데이터"],
+        horizontal=True,
+        key="map_type_selector",
+    )
 
-    # 2. (향후 과제) 지도를 클릭했을 때 에이전트 작동시키기
+    with st.container():
+        if map_type == "국가별 이슈 데이터":
+            render_country_data_map()
+        else:
+            render_global_earthquake_map()
+
+    # (향후 과제) 지도를 클릭했을 때 에이전트 작동시키기
     # st.pydeck_chart는 클릭된 객체의 정보를 반환할 수 있습니다.
-    # 이를 활용해 사용자가 지진 기둥을 클릭하면,
-    # 'sidebar_country' 세션 값을 해당 지역 국가로 업데이트하고
-    # 에이전트 검색을 자동 트리거하는 로직을 붙여보세요.
 
 
 def show_starter_guide():
@@ -133,7 +235,7 @@ def show_starter_guide():
                 안녕하세요! 어떤 국가의 어떤 분야 이슈가 궁금하세요?
                 - 사이드 바 : 국가 명을 입력하고, 분야(경제/문화/교육/과학/방산)와 기간을 선택해 주세요.
                 - 챗 입력창 : 국가 + 분야 + 기간(옵셔널임, 기본값: 10년)을 포함하여 입력해 주세요.
-                - 지도 모드 : 아래의 지도를 클릭하면 해당 국가의 분야별 검색 이력을 확인할 수 있어요! (Comming Soon)
+                - 보이스 챗 : 음성으로 국가별 이슈 검색 이력을 확인할 수 있어요! (Comming Soon)
             """,
         },
         # 안내 문구 바로 아래에 지도를 띄우기 위한 특수 메시지 추가!
@@ -242,13 +344,26 @@ with st.sidebar:
         use_container_width=True,
         disabled=st.session_state.is_processing,
     ):
-        # 상태 변경 및 검색 트리거 활성화
-        st.session_state.thread_id = str(uuid.uuid4())
-        st.session_state.is_processing = True
-        st.session_state.start_search = True
-        st.session_state.waiting_for_user = False
-        st.session_state.issues = []
-        st.rerun()
+        # 🚨 국가명이 비어있는지 1차 확인
+        if not country_input.strip():
+            st.session_state.messages.append(
+                {
+                    "role": "assistant",
+                    "type": "warning",
+                    "title": "국가 정보 누락",
+                    "content": "사이드바에 대상 국가(예: 대한민국)를 입력하고 다시 시도해 주세요.",
+                }
+            )
+            st.rerun()  # 경고만 띄우고 즉시 렌더링
+
+        else:
+            # 정상 입력 시 상태 변경 및 검색 트리거 활성화
+            st.session_state.thread_id = str(uuid.uuid4())
+            st.session_state.is_processing = True
+            st.session_state.start_search = True
+            st.session_state.waiting_for_user = False
+            st.session_state.issues = []
+            st.rerun()
 
     if st.button(
         "대화 초기화",
@@ -271,11 +386,26 @@ with st.sidebar:
                 found_issues = search_result.get("issue_list", [])
                 st.session_state.issues = found_issues
 
+                # ⚠️ 검색된 이슈가 존재한다면 지도를 먼저 보여주기 위해 상태 주입
+                # if found_issues:
+                #     st.session_state.messages.append(
+                #         {"role": "assistant", "type": "map"}
+                #     )
+
                 target_info = f"{payload['country_input']}의 {get_domain_keyword(payload['domain'])} 이슈"
                 full_response = (
                     f"🔍 **{target_info}**에 대한 히스토리 분석 결과입니다:\n\n"
                 )
-                full_response += "\n".join(found_issues)
+
+                # issue 검색 결과의 데이터 유형에 따른 분기 처리
+                if isinstance(found_issues, list):
+                    # gemini의 경우, 첫 번째 요소만 사용하도록 처리
+                    if len(found_issues) == 2 and found_issues[1] == []:
+                        st.session_state.issues = found_issues[0]
+                    else:
+                        st.session_state.issues = found_issues
+
+                full_response += "\n".join(st.session_state.issues)
 
                 st.session_state.messages.append(
                     {"role": "assistant", "content": full_response}
@@ -308,10 +438,10 @@ with st.sidebar:
                 "domain": domain,
             }
 
-            with st.spinner("Tavily 검색 및 LLM 분석 중..."):
+            with st.spinner("히스토리 검색 및 이슈 분석 중..."):
                 fetch_issues(payload=input_data)
         else:
-            # 에러 메시지를 띄우고 함수 실행을 멈춤
+            # 🚨 에러 메시지를 띄우고 함수 실행을 멈춤
             st.session_state.messages.append(
                 {
                     "role": "assistant",
@@ -319,6 +449,11 @@ with st.sidebar:
                     "content": "등록되지 않거나 잘못된 국가명입니다. 정확한 국가명(예: 대한민국)과 관심 분야(경제/문화/교육/과학/방산)를 입력해주세요.",
                 }
             )
+
+            # 리런하기 전에 반드시 상태를 초기화해야 UI 먹통 현상이 풀립니다!
+            st.session_state.is_processing = False
+            st.session_state.start_search = False
+
             st.rerun()  # 에러 메시지 띄우고 즉시 종료
 
         # 작업 완료 후 상태 복구 및 리런
@@ -338,7 +473,8 @@ for message in st.session_state.messages:
             st.image(message["path"])
 
         elif message.get("type") == "map":
-            render_global_earthquake_map()
+            # render_global_earthquake_map()
+            render_country_data_map()
 
         elif message.get("type") == "warning":
             st.warning(f"⚠️ {message['content']}\n\n{message['title']}")
@@ -364,10 +500,11 @@ if prompt := st.chat_input(
     # 에이전트 응답 생성
     with st.chat_message("assistant"):
         response_placeholder = st.empty()
+        map_placeholder = st.empty()
         full_response = ""
 
         # 여기서 run_geo_agent를 호출 (classify_user_intent_node에서 country 추출)
-        with st.spinner("Tavily 검색 및 LLM 분석 중..."):
+        with st.spinner("히스토리 검색 및 이슈 분석 중..."):
             input_data = {
                 "messages": [("user", prompt)],  # LangChain 메시지 형식
                 "years": years,
@@ -438,7 +575,26 @@ if prompt := st.chat_input(
                     # 정상적으로 이슈 리스트가 돌아온 경우
                     if "issue_list" in result_data:
                         issues = result_data["issue_list"]
-                        st.session_state.issues = issues
+
+                        if not issues:
+                            st.session_state.messages.append(
+                                {
+                                    "role": "assistant",
+                                    "content": "🔍 검색 결과가 없습니다. 다른 국가나 분야로 시도해 보세요.",
+                                }
+                            )
+                            st.rerun()  # 결과 없음을 알리고 즉시 종료
+
+                        found_issues = st.session_state.issues
+                        print(f"🔍 CA-이슈 {found_issues}")  # 디버깅용 출력
+
+                        # issue 검색 결과의 데이터 유형에 따른 분기 처리
+                        if isinstance(found_issues, list):
+                            # gemini의 경우, 첫 번째 요소만 사용하도록 처리
+                            if len(found_issues) == 2 and found_issues[1] == []:
+                                st.session_state.issues = found_issues[0]
+                            else:
+                                st.session_state.issues = found_issues
 
                         full_response = (
                             f"🔍 **{prompt}**에 대한 히스토리 분석 결과입니다:\n\n"
@@ -461,6 +617,8 @@ if prompt := st.chat_input(
                 if "__interrupt__" in event:
                     st.session_state.waiting_for_user = True
 
+        # 🚨 루프 완료 후 세션 저장소에도 지도가 먼저 나오도록 순서대로 추가
+        st.session_state.messages.append({"role": "assistant", "type": "map"})
         st.session_state.messages.append(
             {"role": "assistant", "content": full_response}
         )
@@ -487,7 +645,20 @@ if (
                 st.session_state.selected_indices
             )  # 이전에 선택한 값 유지
         else:
+            found_issues = st.session_state.issues
+            # print(f"🔍 CB-이슈 {found_issues}")  # 디버깅용 출력
+
+            # issue 검색 결과의 데이터 유형에 따른 분기 처리
+            if isinstance(found_issues, list):
+                # gemini의 경우, 첫 번째 요소만 사용하도록 처리
+                if len(found_issues) == 2 and found_issues[1] == []:
+                    st.session_state.issues = found_issues[0]
+                else:
+                    st.session_state.issues = found_issues
+
             for idx, issue in enumerate(st.session_state.issues):
+                # print(f"🔍 이슈 {idx}: {issue}")  # 디버깅용 출력
+                # 문자열로 변환된 텍스트를 체크박스에 전달
                 if st.checkbox(issue[3:], key=f"issue_{idx}"):
                     selected_indices.append(idx)
 

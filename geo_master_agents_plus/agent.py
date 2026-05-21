@@ -1,20 +1,22 @@
 import operator
 import re
+import uuid
 from typing import Annotated, Any, List, TypedDict
 
 from langchain_core.runnables import RunnableConfig
-from langchain_openai import ChatOpenAI
+from langchain_google_genai import ChatGoogleGenerativeAI
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command, Send, interrupt
 from pydantic import BaseModel, Field
 from tools import (
     CloudflareD1Saver,
-    generate_single_image3,
+    generate_single_image,
     get_refined_issues,
 )
 from utils import (
     generate_cache_key_for_image,
     get_kv_cache,
+    insert_issue_info,
     set_kv_cache,
 )
 
@@ -25,6 +27,8 @@ class AgentState(TypedDict):
     country: str  # 예: "한국", "kr", "south korea" -> "Korea, Republic of" (도구에서 영어 공식 명칭으로 치환)
     years: int  # 예: 1~100 사이의 정수 (고대 문명 시대도 포함하면 좋겠으나 검색 가능 데이터를 고려해서 100년 정도로 제한)
     issue_list: List[str]  # 검색된 이슈 목록 Top N (예: 5개)
+    issue_ids: List[int]  # 검색된 이슈들의 고유 ID 리스트
+    selected_issue_ids: List[int]  # 사용자가 선택한 이슈의 고유 ID 리스트
     selected_indices: List[int]  # 사용자가 선택한 번호들 (HITL 입력값)
     selected_years: List[int]  # 선택한 이슈의 연도(yyyy) 값들
     final_images: Annotated[List[dict], operator.add]  # 병렬 실행 결과 취합
@@ -54,7 +58,7 @@ class UserIntent(BaseModel):
 def classify_user_intent_node(state: AgentState):
     """단계 0: 사용자 의도 분석"""
 
-    llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
+    llm = ChatGoogleGenerativeAI(model="gemini-2.0-flash", temperature=0)
     structured_llm = llm.with_structured_output(UserIntent)
 
     messages = state.get("messages", [])
@@ -130,9 +134,45 @@ def search_historical_issues_node(state: AgentState):
             ]
         }
 
-    # 2. Tool 호출 (State 값을 인자로 전달)
-    results = get_refined_issues(domain, country, years, top_n)
-    return {"issue_list": results}
+    # 2. Tool 호출 (State 값을 인자로 전달 - 마지막 사용자 메시지에서 user_id 추출)
+    user_id = state.get("user_id", None)
+    results = get_refined_issues(domain, country, years, top_n, user_id)
+
+    # issue 검색 결과의 데이터 유형에 따른 분기 처리
+    # if isinstance(results, list):
+    #     # gemini의 경우, 첫 번째 요소만 사용하도록 처리
+    #     if len(results) == 2 and results[1] == []:
+    #         results = results[0]
+    print(f"🔍 검색된 이슈 목록: {results}")
+
+    real_issue_ids = []
+    for issue_text in results:
+        # 이슈 텍스트에서 연도 추출 (예: "2018: 무역 협력...")
+        year_match = re.search(r"^(\d{4})", issue_text)
+        year = int(year_match.group(1)) if year_match else 0
+
+        # D1 이슈 테이블에 저장
+        inserted_id = insert_issue_info(
+            domain=domain,
+            country=country,
+            year=year,
+            content=issue_text,
+            user_id=state.get("user_id"),  # 필요시 int 형변환
+        )
+
+        # 저장 성공 시 발급된 정수 ID 추가, 실패 시 임시 방어 코드(0) 추가
+        if inserted_id:
+            real_issue_ids.append(inserted_id)
+        else:
+            print(
+                f"⚠️ 이슈 저장 실패로 인해 ID를 0으로 대체합니다: {issue_text[:10]}..."
+            )
+            real_issue_ids.append(0)
+
+    return {
+        "issue_list": results,
+        "issue_ids": real_issue_ids,
+    }
 
 
 def approve_by_human_node(state: AgentState):
@@ -166,7 +206,20 @@ def approve_by_human_node(state: AgentState):
             selected_years.append(0)
 
     # 4. State에 선택된 인덱스와 추출된 연도 리스트를 함께 업데이트
+    safe_issue_ids = state.get("issue_ids", [])
+    selected_ids = []
+
+    for i in valid_indices:
+        # 안전장치: 인덱스 에러를 방지하고 누락 시 새 UUID 발급
+        if i < len(safe_issue_ids):
+            selected_ids.append(safe_issue_ids[i])
+        else:
+            selected_ids.append(str(uuid.uuid4()))
+
+    # 4. State에 선택된 인덱스와 추출된 연도 리스트를 함께 업데이트
     return {
+        # "selected_issue_ids": [state.get("issue_ids", [])[i] for i in valid_indices],
+        "selected_issue_ids": selected_ids,  # 👈 안전하게 추출된 리스트
         "selected_indices": valid_indices,
         "selected_years": selected_years,
     }
@@ -180,13 +233,18 @@ def trigger_parallel_jobs_node(state: AgentState):
         Send(
             "cartoon_generation",
             {
-                "issue_text": state["issue_list"][idx],
-                "year": year,  # 👈 개별 연도 전달
                 "domain": state["domain"],
                 "country": state["country"],
+                "year": year,  # 👈 개별 연도 전달
+                "issue_text": state["issue_list"][idx],
+                "issue_id": id,  # 👈 개별 이슈 ID 전달 (도구에서 반환된 값)
             },
         )
-        for idx, year in zip(state["selected_indices"], state["selected_years"])
+        for id, idx, year in zip(
+            state["selected_issue_ids"],
+            state["selected_indices"],
+            state["selected_years"],
+        )
     ]
 
 
@@ -195,7 +253,7 @@ def create_cartoon_image_node(state: ImageTaskState, config: RunnableConfig):
 
     # 🚨 터미널 진행 상황 출력 추가!
     print(
-        f"\n🎨 [이미지 생성 중] Gemini API 호출을 시작합니다: {state['issue_text'][:20]}..."
+        f"\n🎨 [이미지 생성 중] Nano Banana API 호출을 시작합니다: {state['issue_text'][:20]}..."
     )
     issue_text = state["issue_text"]
 
@@ -224,8 +282,8 @@ def create_cartoon_image_node(state: ImageTaskState, config: RunnableConfig):
 
     # 3. 캐시 미스 시 이미지 생성
     refined_text = issue_text[3:].strip()
-    user_id = config.get("configurable", {}).get("user_id", "guest")
-    result = generate_single_image3(refined_text, user_id)
+    # user_id = config.get("configurable", {}).get("user_id", "guest")
+    result = generate_single_image(refined_text, state.get("issue_id"))
     print(
         f"✅ [이미지 생성 완료] 결과({state.get('domain')}-{state.get('country')}-{state.get('year')})를 반환합니다."
     )
@@ -249,7 +307,7 @@ def create_cartoon_image_node(state: ImageTaskState, config: RunnableConfig):
                     "status": "success",
                     "file": new_url,
                     "issue": issue_text,
-                    "is_cached": False,  # 👈 신규 생성 플래그 추가!
+                    "is_cached": False,  # 👈 새로 생성된 이미지임을 표시
                 }
             ]
         }

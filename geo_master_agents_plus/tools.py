@@ -13,7 +13,7 @@ from dotenv import load_dotenv
 from google import genai
 from google.genai import types
 from langchain_core.messages import HumanMessage
-from langchain_openai import ChatOpenAI
+from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_tavily import TavilySearch
 from langgraph.checkpoint.base import (
     BaseCheckpointSaver,
@@ -21,7 +21,6 @@ from langgraph.checkpoint.base import (
     CheckpointMetadata,
     CheckpointTuple,
 )
-from openai import OpenAI
 from PIL import Image, ImageDraw, ImageFont
 from tenacity import retry, stop_after_attempt, wait_exponential
 from utils import (
@@ -30,7 +29,7 @@ from utils import (
     generate_cache_key_for_search,
     get_image_url,
     get_kv_cache,
-    insert_image_metadata,
+    insert_cartoon_info,
     set_kv_cache,
     upload_image_to_r2,
 )
@@ -42,9 +41,9 @@ load_dotenv()
 logger = logging.getLogger(__name__)
 
 
-# 지오 마스터 에이전트 전용 LLM 정의
-llm = ChatOpenAI(
-    model="gpt-4o-mini",
+# 지오 마스터 에이전트 전용 LLM 정의 (Gemini 기반)
+llm = ChatGoogleGenerativeAI(
+    model="gemini-2.0-flash",
     temperature=0,  # 추론의 일관성을 위해 0으로 설정
     max_retries=2,  # API 호출 실패 시 재시도 횟수
 )
@@ -124,7 +123,9 @@ def get_global_country_map():
 
 
 # Tool 1: 이슈 검색 (Tavily 활용)
-def get_refined_issues(domain: str, country: str, years: int, top_n: int = 5) -> list:
+def get_refined_issues(
+    domain: str, country: str, years: int, top_n: int = 5, user_id: int = None
+) -> list:
     """
     검색 도구와 LLM을 결합하여 정제된 Top 5 이슈 목록을 반환합니다.
     """
@@ -147,24 +148,43 @@ def get_refined_issues(domain: str, country: str, years: int, top_n: int = 5) ->
     # Step B: Raw 데이터 검색 (캐싱 로직 적용)
     cache_key = generate_cache_key_for_search(domain, country, years)
     cache_val = get_kv_cache(cache_key)
-    row = json.loads(cache_val) if cache_val else None
+
+    if isinstance(cache_val, list):
+        # 캐시된 데이터가 이미 리스트 형태로 저장되어 있는 경우 (최적화된 케이스)
+        # search_results, issue_ids = cache_val
+        row = json.loads(cache_val[0]) if len(cache_val) > 0 else None
+    else:
+        row = json.loads(cache_val) if cache_val else None
+
+    # issue_ids = []
 
     if row:
         print(f"\n⚡ [Cache Hit] '{cache_key}' 조건의 캐시된 검색 결과를 불러옵니다.")
 
-        # D1 API에서 첫 번째 컬럼의 값을 가져옵니다.
-        raw_data = list(row.values())[0]
+        # 1. 최근 테스트로 인해 리스트 형태로 캐시된 경우 ( [search_results, issue_ids] )
+        if isinstance(row, list):
+            search_results = row[0]
 
-        try:
-            # 1. 1차 시도: 표준 JSON으로 읽기
-            search_results = json.loads(raw_data)
-        except json.JSONDecodeError:
-            # 2. 2차 시도: 파이썬 리스트 문자열("['이슈1', '이슈2']")로 저장된 경우 복원
+        # 2. 과거 딕셔너리 형태로 캐시된 경우
+        elif isinstance(row, dict):
             try:
-                search_results = ast.literal_eval(raw_data)
+                search_results = list(row.values())[0]
+            except json.JSONDecodeError:
+                # 2차 시도: 파이썬 리스트 문자열("['이슈1', '이슈2']")로 저장된 경우 복원
+                try:
+                    parsed_data = ast.literal_eval(search_results)
+                    search_results = parsed_data[0]
+                    # issue_ids = parsed_data[1]
+                except Exception:
+                    # 3. 최후의 수단: 알 수 없는 문자열인 경우 에러 방지를 위해 강제 리스트화
+                    search_results = [search_results]
             except Exception:
-                # 3. 최후의 수단: 알 수 없는 문자열인 경우 에러 방지를 위해 강제 리스트화
-                search_results = [raw_data]
+                search_results = row
+
+        # 3. 그 외 (정상적인 텍스트나 단일 리스트)
+        else:
+            search_results = row
+
     else:
         print(f"\n🌐 [Cache Miss] '{cache_key}' 조건의 데이터를 새로 검색합니다...")
         search_tool = TavilySearch(max_results=10)
@@ -173,8 +193,18 @@ def get_refined_issues(domain: str, country: str, years: int, top_n: int = 5) ->
         )
         search_results = search_tool.invoke({"query": search_query})
 
+        # 검색 트렌드 분석을 위해 이력 테이블에도 저장
+        # if isinstance(search_results, list):
+        #     for issue in search_results:
+        #         year = re.search(r"^(\d{4})", issue)
+        #         issue_id = insert_issue_info(domain, country, year, issue, user_id)
+        #         issue_ids.append(issue_id)
+
         # 검색 결과를 JSON 문자열로 변환하여 DB에 저장
-        set_kv_cache(cache_key, json.dumps(search_results))
+        # set_kv_cache(cache_key, json.dumps([search_results, issue_ids]))
+
+        # 🚨 불필요한 DB 저장 로직 제거! 순수하게 Tavily 검색 결과만 캐싱합니다.
+        set_kv_cache(cache_key, search_results)
 
     # Step C: 검색 결과 정리 with 데이터 타입 체크
     if isinstance(search_results, str):
@@ -212,58 +242,100 @@ def get_refined_issues(domain: str, country: str, years: int, top_n: int = 5) ->
 
     # Step D: 결과 파싱 및 리스트화
     issues = [line.strip() for line in response.content.split("\n") if line.strip()]
+    # return [issues[:10], issue_ids]
     return issues[:10]
 
 
-# Tool 2a: 이미지 생성 (DALL-E 3 or GPT Image 활용)
-def generate_single_image(prompt: str) -> dict:
-    """개별 이슈에 대해 이미지를 생성하고 결과를 안전하게 처리합니다."""
-    client = OpenAI()
+def log_retry_attempt(retry_state):
+    logger.warning(
+        f"⚠️ Gemini API 503 지연 발생! {retry_state.attempt_number}번째 재시도 중... "
+        f"(대기 시간: {retry_state.idle_for}초)"
+    )
+
+
+def handle_retry_error(retry_state):
+    """모든 재시도(4회) 실패 시 호출되는 콜백 함수"""
+    # 에이전트가 죽지 않도록, 실패했다는 '상태 정보'를 딕셔너리로 반환합니다.
+    return {
+        "status": "error",
+        "fallback_text": "🚦 구글 서버(Gemini)에 요청이 너무 많아 대기 시간이 초과되었습니다. 1~2분 뒤 다시 시도해 주세요!",
+    }
+
+
+# Tool 2a: 이미지 생성 (Nano Banana 2 활용) + R2 업로드 + D1 메타데이터 저장
+# ---------------------------------------------------------
+# 🚨 총 4번 재시도, 3초/6초/12초 간격으로 점진적 대기
+# ---------------------------------------------------------
+@retry(
+    stop=stop_after_attempt(4),
+    wait=wait_exponential(multiplier=2, min=3, max=15),
+    after=log_retry_attempt,
+    reraise=True,  # 모든 재시도 실패 시 최종 에러 반환
+    retry_error_callback=handle_retry_error,  # 👈 실패 시 죽지 않고 대체 값 반환
+)
+def generate_single_image(prompt: str, issue_id: int) -> dict:
+    """
+    Nano Banana를 사용하여 한글이 포함된 고해상도 교육 삽화를 생성합니다.
+    """
+    client = genai.Client()
 
     models = (
-        "dall-e-3",
-        "gpt-image-1",
-        "gpt-image-1-mini",
+        "nano-banana-pro-preview",
+        "gemini-3.1-pro-image-preview",
+        "gemini-3.1-flash-image-preview",
     )
     selected_model = f"models/{models[2]}"
 
     try:
-        response = client.images.generate(
+        # 이미지 생성 (Nano Banana 2) 예시
+        response = client.models.generate_content(
             model=selected_model,
-            prompt=(
+            contents=(
                 f"A professional historical educational cartoon style illustration of: {prompt}. "
                 f"Aspect Ratio: 1:1. Square format. "
                 f"Please render the Korean text precisely and beautifully."
             ),
-            size="1024x1024",
-            quality="medium",
-            n=1,
         )
+        image_part = response.candidates[0].content.parts[0]
 
-        download_dir = "downloads"
-        os.makedirs(download_dir, exist_ok=True)
-        file_name = f"image_{abs(hash(prompt))}.png"
-        file_path = os.path.join(download_dir, file_name)
+        if hasattr(image_part, "inline_data"):
+            file_name = f"image_{abs(hash(prompt))}.png"
+            image_bytes = image_part.inline_data.data
 
-        image_bytes = base64.b64decode(response.data[0].b64_json)
-        with open(file_path, "wb") as f:
-            f.write(image_bytes)
+            # 로컬 저장 대신 R2 업로드 함수 호출
+            upload_image_to_r2(file_name, image_bytes)
 
-        return {
-            "status": "success",
-            "file": file_name,
-            "model": selected_model,
-        }
+            # Streamlit이나 UI에 전달할 수 있도록 접근 가능한 URL 생성
+            image_url = get_image_url(
+                file_name, public_domain=os.getenv("CF_R2_PUBLIC_GEO_MASTER_URL")
+            )
+
+            # 생성된 이미지 URL과 메타데이터를 D1에 저장
+            insert_cartoon_info(prompt, image_url, issue_id)
+
+            return {
+                "status": "success",
+                "file": image_url,
+                "model": selected_model,
+            }
+        else:
+            raise ValueError("응답에 이미지 데이터가 포함되어 있지 않습니다.")
 
     except Exception as e:
-        # 세이프티 시스템에 의해 차단된 경우 (Error 400 등)
-        logging.warning(f"API 에러: {e}")
+        error_msg = str(e)
+        logging.error(f"API 에러: {error_msg}")
 
-        return {
-            "status": "filtered",
-            "fallback_text": "안전 정책 또는 API 오류로 인해 이미지 생성이 차단되었습니다.",
-            "reason": f"Safety filters or API error: {e}",
-        }
+        # 💡 503 에러이거나 "고부하(high demand)" 관련 에러일 경우,
+        # Exception을 발생(raise)시켜야 tenacity가 "아, 실패했구나! 다시 시도하자"라고 인식합니다.
+        if (
+            "503" in error_msg
+            or "high demand" in error_msg
+            or "UNAVAILABLE" in error_msg
+        ):
+            raise e  # 👈 tenacity에게 재시도를 요청하기 위해 에러를 다시 던집니다.
+
+        # 그 외의 심각한 에러(예: API 키 오류 등)는 재시도하지 않고 바로 실패 반환
+        return {"status": "error", "fallback_text": error_msg}
 
 
 # Tool 2b: 이미지 생성 (Imagen 4 + Pillow Text Overay 활용)
@@ -338,98 +410,6 @@ def generate_single_image2(prompt: str) -> dict:
             "fallback_text": "안전 정책 또는 API 오류로 인해 이미지 생성이 차단되었습니다.",
             "reason": f"Safety filters or API error: {e}",
         }
-
-
-def log_retry_attempt(retry_state):
-    logger.warning(
-        f"⚠️ Gemini API 503 지연 발생! {retry_state.attempt_number}번째 재시도 중... "
-        f"(대기 시간: {retry_state.idle_for}초)"
-    )
-
-
-def handle_retry_error(retry_state):
-    """모든 재시도(4회) 실패 시 호출되는 콜백 함수"""
-    # 에이전트가 죽지 않도록, 실패했다는 '상태 정보'를 딕셔너리로 반환합니다.
-    return {
-        "status": "error",
-        "fallback_text": "🚦 구글 서버(Gemini)에 요청이 너무 많아 대기 시간이 초과되었습니다. 1~2분 뒤 다시 시도해 주세요!",
-    }
-
-
-# Tool 2c: 이미지 생성 (Nano Banana 2 활용) + R2 업로드 + D1 메타데이터 저장
-# ---------------------------------------------------------
-# 🚨 총 4번 재시도, 3초/6초/12초 간격으로 점진적 대기
-# ---------------------------------------------------------
-@retry(
-    stop=stop_after_attempt(4),
-    wait=wait_exponential(multiplier=2, min=3, max=15),
-    after=log_retry_attempt,
-    reraise=True,  # 모든 재시도 실패 시 최종 에러 반환
-    retry_error_callback=handle_retry_error,  # 👈 실패 시 죽지 않고 대체 값 반환
-)
-def generate_single_image3(prompt: str, user_id: str) -> dict:
-    """
-    Nano Banana (Gemini Image)를 사용하여 한글이 포함된 고해상도 교육 삽화를 생성합니다.
-    """
-    client = genai.Client()
-
-    models = (
-        "nano-banana-pro-preview",
-        "gemini-3.1-pro-image-preview",
-        "gemini-3.1-flash-image-preview",
-    )
-    selected_model = f"models/{models[2]}"
-
-    try:
-        # 이미지 생성 (Nano Banana 2) 예시
-        response = client.models.generate_content(
-            model=selected_model,
-            contents=(
-                f"A professional historical educational cartoon style illustration of: {prompt}. "
-                f"Aspect Ratio: 1:1. Square format. "
-                f"Please render the Korean text precisely and beautifully."
-            ),
-        )
-        image_part = response.candidates[0].content.parts[0]
-
-        if hasattr(image_part, "inline_data"):
-            file_name = f"image_{abs(hash(prompt))}.png"
-            image_bytes = image_part.inline_data.data
-
-            # 로컬 저장 대신 R2 업로드 함수 호출
-            upload_image_to_r2(file_name, image_bytes)
-
-            # Streamlit이나 UI에 전달할 수 있도록 접근 가능한 URL 생성
-            image_url = get_image_url(
-                file_name, public_domain=os.getenv("CF_R2_PUBLIC_GEO_MASTER_URL")
-            )
-
-            # 생성된 이미지 URL과 메타데이터를 D1에 저장
-            insert_image_metadata(user_id, prompt, image_url)
-
-            return {
-                "status": "success",
-                "file": image_url,
-                "model": selected_model,
-            }
-        else:
-            raise ValueError("응답에 이미지 데이터가 포함되어 있지 않습니다.")
-
-    except Exception as e:
-        error_msg = str(e)
-        logging.error(f"API 에러: {error_msg}")
-
-        # 💡 503 에러이거나 "고부하(high demand)" 관련 에러일 경우,
-        # Exception을 발생(raise)시켜야 tenacity가 "아, 실패했구나! 다시 시도하자"라고 인식합니다.
-        if (
-            "503" in error_msg
-            or "high demand" in error_msg
-            or "UNAVAILABLE" in error_msg
-        ):
-            raise e  # 👈 tenacity에게 재시도를 요청하기 위해 에러를 다시 던집니다.
-
-        # 그 외의 심각한 에러(예: API 키 오류 등)는 재시도하지 않고 바로 실패 반환
-        return {"status": "error", "fallback_text": error_msg}
 
 
 # Cloudflare D1의 REST API와 통신하는 커스텀 클래스
