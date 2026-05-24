@@ -309,8 +309,8 @@ def generate_single_image_with_fal(
         "flux/schnell",  # 가성비 최상, 초고속 생성 (1~4 steps 권장)
         "ideogram/v2-turbo",  # 타이포그래피와 포스터 디자인, 텍스트 합성에 세계 최고 수준으로 특화
         "stable-diffusion-3.5-large",  # 이전 SDXL 버전에 비해 텍스트 인코더가 강화
-        "nano-banana-turbo",  # 초고속 생성을 지원하면서도 텍스트 형태를 유지하는 속도 최적화
-        "nano-banana-v2",  # 구글 Nano Banana Pro 모델 (SDXL 기반, 한글 텍스트 표현 우수)
+        "nano-banana-2",  # 이전 세대보다 프롬프트 이해도와 다국어 텍스트 렌더링 성능이 대폭 업그레이드
+        "nano-banana-pro",  # 구도, 빛의 표현, 아주 복잡한 한글 문장 합성에 영혼을 갈아 넣은 최상위 모델
     )
     selected_model = f"fal-ai/{models[3]}"
 
