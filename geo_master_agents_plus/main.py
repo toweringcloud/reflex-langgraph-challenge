@@ -1,21 +1,29 @@
+# =====================================================================
+# 1. Python Default (내장 표준 라이브러리)
+# =====================================================================
 import uuid
 
+# =====================================================================
+# 2. Installed Packages (uv로 설치한 외부 라이브러리)
+# =====================================================================
 import pandas as pd
 import pydeck as pdk
 import requests
 import streamlit as st
 import streamlit.components.v1 as components
+
+# =====================================================================
+# 3. Custom Files (직접 만든 로컬 모듈 및 에어전트 툴)
+# =====================================================================
 from agent import run_geo_agent
+from data import DOMAIN, GEO_ALIASES_REVERSE
+from services import get_country_map_statistics
 from tools import (
     get_country_map,
     get_domain_keyword,
-    get_elevenlabs_stt,
-    get_elevenlabs_tts,
-)
-from utils import (
-    GEO_ALIASES_REVERSE,
-    get_country_map_statistics,
     get_image_base64,
+    speech_to_text_with_elevenlabs,
+    text_to_speech_with_elevenlabs,
 )
 
 st.set_page_config(page_title="지오 마스터 플러스", layout="wide")
@@ -298,20 +306,11 @@ st.title("🌍 Geo Master Plus")
 with st.sidebar:
     st.header("⚙️ 사이드바 이슈 검색")
 
-    # Label과 Value를 매핑할 딕셔너리 생성 (원하는 이모지도 넣을 수 있습니다!)
-    domain_mapping = {
-        "economy": "💰 경제 (Economy)",
-        "culture": "🎭 문화 (Culture)",
-        "education": "📚 교육 (Education)",
-        "science": "🔬 과학 (Science)",
-        "military": "⚔️ 방산 (Military)",
-    }
-
     # selectbox에 format_func 적용
     domain = st.selectbox(
         "관심 분야",
-        options=list(domain_mapping.keys()),
-        format_func=lambda x: domain_mapping[x],
+        options=list(DOMAIN.keys()),
+        format_func=lambda x: DOMAIN[x],
         key="sidebar_domain",  # 👈 위젯 전용 내부 키
         disabled=st.session_state.is_processing,
     )
@@ -504,7 +503,7 @@ with st.bottom:
 
         with st.spinner("음성을 텍스트로 변환 중..."):
             # 음성 인식 (STT) 결과를 prompt에 저장
-            stt_result = get_elevenlabs_stt(audio_value)
+            stt_result = speech_to_text_with_elevenlabs(audio_value)
             if stt_result:
                 prompt = stt_result  # 성공 시 prompt에 텍스트 장전
             else:
@@ -760,7 +759,7 @@ def generate_images():
                         is_cached = res.get("is_cached", False)
 
                         # 🗣️ 이슈 설명을 AI 보이스 (TTS)로 출력
-                        tts_audio = get_elevenlabs_tts(issue_title)
+                        tts_audio = text_to_speech_with_elevenlabs(issue_title)
 
                         if img_path:
                             # 영구 보관용 세션 저장
@@ -771,8 +770,10 @@ def generate_images():
                                     "is_cached": is_cached,
                                     "title": issue_title,
                                     "path": img_path,
+                                    "audio": tts_audio,
                                 }
                             )
+
                             # 사용자 피드백용 실시간 화면 출력
                             with realtime_container:
                                 if is_cached:
@@ -785,9 +786,9 @@ def generate_images():
                                     )
                                 st.image(img_path)
 
-                            # 🗣️ 자동재생을 끄고, 개별 오디오 플레이어 위젯 배치
-                            if tts_audio:
-                                st.audio(tts_audio, format="audio/mpeg")
+                                # 🗣️ 자동재생을 끄고, 개별 오디오 플레이어 위젯 배치
+                                if tts_audio:
+                                    st.audio(tts_audio, format="audio/mpeg")
 
                         else:
                             st.session_state.messages.append(

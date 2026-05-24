@@ -1,3 +1,6 @@
+# =====================================================================
+# 1. Python Default
+# =====================================================================
 import ast
 import base64
 import gettext
@@ -5,8 +8,11 @@ import io
 import json
 import logging
 import os
-from typing import Any, Optional, Sequence, Tuple
 
+# =====================================================================
+# 2. Installed Packages
+# =====================================================================
+import fal_client
 import pycountry
 import requests
 from dotenv import load_dotenv
@@ -17,17 +23,14 @@ from langchain_core.messages import HumanMessage
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_openai import ChatOpenAI
 from langchain_tavily import TavilySearch
-from langgraph.checkpoint.base import (
-    BaseCheckpointSaver,
-    Checkpoint,
-    CheckpointMetadata,
-    CheckpointTuple,
-)
 from PIL import Image, ImageDraw, ImageFont
 from tenacity import retry, stop_after_attempt, wait_exponential
-from utils import (
-    GEO_ALIASES,
-    GEO_METADATA,
+
+# =====================================================================
+# 3. Custom Files
+# =====================================================================
+from data import GEO_ALIASES, GEO_METADATA
+from services import (
     generate_cache_key_for_search,
     get_image_url,
     get_kv_cache,
@@ -57,9 +60,9 @@ def get_llm_client():
         # llm = ChatAnthropic(model="claude-sonnet-4.5", temperature=0)
         llm = ChatAnthropic(model="claude-haiku-4.5", temperature=0)
     else:
-        llm = ChatOpenAI(model="gpt-5-nano", temperature=0)
+        # llm = ChatOpenAI(model="gpt-5-nano", temperature=0)
         # llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
-        # llm = ChatOpenAI(model="gpt-3.5-turbo", temperature=0)
+        llm = ChatOpenAI(model="gpt-3.5-turbo", temperature=0)
 
     return llm
 
@@ -143,7 +146,12 @@ def get_country_map():
 
 # Tool 1: 이슈 검색 (Tavily 활용)
 def get_refined_issues(
-    domain: str, country: str, years: int, top_n: int = 5, user_id: int = None
+    domain: str,
+    country: str,
+    years: int,
+    top_n: int = 5,
+    user_id: int = None,
+    language: str = "Korean",
 ) -> list:
     """
     검색 도구와 LLM을 결합하여 정제된 Top 5 이슈 목록을 반환합니다.
@@ -239,7 +247,7 @@ def get_refined_issues(
     1. 반드시 숫자로 시작하는 리스트 형식으로만 응답하세요.
     2. "다음은 이슈 목록입니다"와 같은 서론이나 인사말을 절대로 포함하지 마세요.
     3. 각 이슈는 'n. yyyy: [주제] - [설명]' 포맷을 엄격히 준수하세요.
-    4. 주제와 설명 내용은 반드시 '한글 (영문)' 포맷으로 표현하세요.
+    4. 주제와 설명 내용은 반드시 {language} 언어 중심으로 표현하세요.
     5. 도메인 별로 가치 있는 핵심 이슈 5개(최대)를 선정하세요.
 
     검색 결과:
@@ -282,7 +290,178 @@ def handle_retry_error(retry_state):
     }
 
 
-# Tool 2a: 이미지 생성 (Nano Banana 2 활용) + R2 업로드 + D1 메타데이터 저장
+# Tool 1a: 이미지 생성 (FAL API) + D1 메타데이터 저장 -> 한글 텍스트 합성이 필요할 경우, nano banana 모델 선택 권장
+def generate_single_image_with_fal(
+    prompt: str, issue_id: int, language: str | None = "Korean"
+) -> dict:
+    """fal.ai를 사용하여 웹툰 이미지를 초고속으로 생성하고 URL을 반환합니다."""
+
+    # 환경 변수가 잘 로드되었는지 안전장치
+    if not os.getenv("FAL_API_KEY"):
+        print("🚨 FAL_API_KEY 환경 변수가 설정되지 않았습니다.")
+        return None
+
+    # fal_client가 자동으로 읽어갈 수 있도록 FAL_KEY 환경변수에 값을 주입합니다.
+    # client = fal_client(api_key=os.getenv("FAL_API_KEY"))
+    os.environ["FAL_KEY"] = os.getenv("FAL_API_KEY")
+
+    models = (
+        "flux/schnell",  # 가성비 최상, 초고속 생성 (1~4 steps 권장)
+        "ideogram/v2-turbo",  # 타이포그래피와 포스터 디자인, 텍스트 합성에 세계 최고 수준으로 특화
+        "stable-diffusion-3.5-large",  # 이전 SDXL 버전에 비해 텍스트 인코더가 강화
+        "nano-banana-turbo",  # 초고속 생성을 지원하면서도 텍스트 형태를 유지하는 속도 최적화
+        "nano-banana-v2",  # 구글 Nano Banana Pro 모델 (SDXL 기반, 한글 텍스트 표현 우수)
+    )
+    selected_model = f"fal-ai/{models[3]}"
+
+    try:
+        # 모델에게 '배경 삽화'만 그리도록 명확히 지시하는 프롬프트로 수정합니다.
+        prompt = (
+            f"A professional historical educational cartoon style illustration of: {prompt}. "
+            f"Aspect Ratio: 1:1. Square format. "
+            f"Please render the text in {language} precisely and beautifully within the image."
+            if language
+            else "No text rendering needed."
+        )
+
+        # fal_client.subscribe는 대기열(Queue)과 폴링을 자동으로 처리해줍니다.
+        # result = client.subscribe(
+        result = fal_client.subscribe(
+            selected_model,
+            arguments={
+                "prompt": prompt,
+                "image_size": "square_hd",  # 옵션: landscape_4_3, portrait_4_3 등 설정 가능
+                "num_inference_steps": 4,  # 속도를 위해 스텝 수를 낮춤 (모델에 따라 다름)
+            },
+        )
+
+        # 반환된 결과에서 이미지 URL 추출
+        image_url = result["images"][0]["url"]
+
+        if image_url:
+            insert_cartoon_info(prompt, image_url, issue_id)
+
+            return {
+                "status": "success",
+                "file": image_url,
+                "model": selected_model,
+            }
+        else:
+            raise ValueError("응답에 이미지 데이터가 포함되어 있지 않습니다.")
+
+    except Exception as e:
+        error_msg = str(e)
+        print(f"⚠️ fal.ai 이미지 생성 실패: {error_msg}")
+        return {"status": "error", "fallback_text": error_msg}
+
+
+# Tool 1b: 이미지 생성 (FAL API + Pillow Text Overay) + R2 업로드 + D1 메타데이터 저장
+def generate_single_image2_with_fal(
+    prompt: str, issue_id: int, language: str | None = None
+) -> dict:
+    """fal.ai를 사용하여 웹툰 이미지를 초고속으로 생성하고 URL을 반환합니다."""
+
+    # 환경 변수가 잘 로드되었는지 안전장치
+    if not os.getenv("FAL_API_KEY"):
+        print("🚨 FAL_API_KEY 환경 변수가 설정되지 않았습니다.")
+        return None
+    client = fal_client(api_key=os.getenv("FAL_API_KEY"))
+
+    models = (
+        "flux/schnell",  # 가성비 최상, 초고속 생성 (1~4 steps 권장)
+        "flux/dev",  # 고품질/디테일 특화 (비용/시간 약간 증가)
+        "fast-sdxl",  # 매우 빠르고 저렴한 SDXL 기반 모델
+        "seedream",  # 일러스트/애니메이션 스타일에 특화
+    )
+    selected_model = f"fal-ai/{models[0]}"
+
+    try:
+        # 모델에게 '배경 삽화'만 그리도록 명확히 지시하는 프롬프트로 수정합니다.
+        prompt = (
+            f"A professional historical educational cartoon style illustration of: {prompt}. "
+            f"Aspect Ratio: 1:1. Square format. "
+            f"Please render the text in {language} precisely and beautifully within the image."
+            if language
+            else "No text rendering needed."
+        )
+
+        # fal_client.subscribe는 대기열(Queue)과 폴링을 자동으로 처리해줍니다.
+        result = client.subscribe(
+            selected_model,
+            arguments={
+                "prompt": prompt,
+                "image_size": "square_hd",  # 옵션: landscape_4_3, portrait_4_3 등 설정 가능
+                "num_inference_steps": 4,  # 속도를 위해 스텝 수를 낮춤 (모델에 따라 다름)
+            },
+        )
+
+        # 반환된 결과에서 이미지 URL 추출
+        image_url = result["images"][0]["url"]
+
+        if image_url:
+            # --- 한글 텍스트 합성을 위한 로직 추가 ---
+            # 1. fal.ai에서 생성된 원본 이미지 다운로드
+            img_response = requests.get(image_url)
+            img_response.raise_for_status()
+            pil_image = Image.open(io.BytesIO(img_response.content))
+
+            # 2. Pillow를 사용하여 한글 텍스트 합성
+            draw = ImageDraw.Draw(pil_image)
+            try:
+                font = ImageFont.truetype("NanumGothic.ttf", 40)
+            except IOError:
+                # 폰트 파일이 없을 경우 대비 (로컬 환경에 맞춰 폰트명 변경 권장)
+                font = ImageFont.load_default()
+
+            title_text = prompt.split(":")[1].strip() if ":" in prompt else prompt[:20]
+
+            # 텍스트 크기 계산 (Pillow 버전에 따른 호환성 처리)
+            try:
+                w, h = draw.textsize(title_text, font=font)
+            except AttributeError:
+                left, top, right, bottom = draw.textbbox((0, 0), title_text, font=font)
+                w, h = right - left, bottom - top
+
+            W, H = pil_image.size
+            # 텍스트 가독성을 위해 흰색 글씨에 검은색 테두리(stroke) 적용
+            draw.text(
+                ((W - w) / 2, H - h - 30),
+                title_text,
+                font=font,
+                fill="white",
+                stroke_width=2,
+                stroke_fill="black",
+            )
+
+            # 3. 합성된 이미지를 R2에 업로드
+            output_buffer = io.BytesIO()
+            pil_image.save(output_buffer, format="PNG")
+            file_name = f"image_{abs(hash(prompt))}.png"
+            upload_image_to_r2(file_name, output_buffer.getvalue())
+
+            # 4. R2 Public URL 가져오기
+            final_image_url = get_image_url(
+                file_name, public_domain=os.getenv("CF_R2_PUBLIC_GEO_MASTER_URL")
+            )
+
+            # 5. 생성된 최종 이미지 URL과 메타데이터를 D1에 저장
+            insert_cartoon_info(prompt, final_image_url, issue_id)
+
+            return {
+                "status": "success",
+                "file": final_image_url,
+                "model": f"{selected_model} + Pillow",
+            }
+        else:
+            raise ValueError("응답에 이미지 데이터가 포함되어 있지 않습니다.")
+
+    except Exception as e:
+        error_msg = str(e)
+        print(f"⚠️ fal.ai 이미지 생성 실패: {error_msg}")
+        return {"status": "error", "fallback_text": error_msg}
+
+
+# Tool 2a: 이미지 생성 (Nano Banana) + R2 업로드 + D1 메타데이터 저장
 # ---------------------------------------------------------
 # 🚨 총 4번 재시도, 3초/6초/12초 간격으로 점진적 대기
 # ---------------------------------------------------------
@@ -293,7 +472,9 @@ def handle_retry_error(retry_state):
     reraise=True,  # 모든 재시도 실패 시 최종 에러 반환
     retry_error_callback=handle_retry_error,  # 👈 실패 시 죽지 않고 대체 값 반환
 )
-def generate_single_image(prompt: str, issue_id: int) -> dict:
+def generate_single_image(
+    prompt: str, issue_id: int, language: str | None = "Korean"
+) -> dict:
     """
     Nano Banana를 사용하여 한글이 포함된 고해상도 교육 삽화를 생성합니다.
     """
@@ -314,7 +495,9 @@ def generate_single_image(prompt: str, issue_id: int) -> dict:
             contents=(
                 f"A professional historical educational cartoon style illustration of: {prompt}. "
                 f"Aspect Ratio: 1:1. Square format. "
-                f"Please render the Korean text precisely and beautifully."
+                f"Please render the text in {language} precisely and beautifully within the image."
+                if language
+                else "No text rendering needed."
             ),
         )
         image_part = response.candidates[0].content.parts[0]
@@ -344,7 +527,7 @@ def generate_single_image(prompt: str, issue_id: int) -> dict:
 
     except Exception as e:
         error_msg = str(e)
-        logging.error(f"API 에러: {error_msg}")
+        print(f"⚠️ gemini 이미지 생성 실패: {error_msg}")
 
         # 💡 503 에러이거나 "고부하(high demand)" 관련 에러일 경우,
         # Exception을 발생(raise)시켜야 tenacity가 "아, 실패했구나! 다시 시도하자"라고 인식합니다.
@@ -359,8 +542,10 @@ def generate_single_image(prompt: str, issue_id: int) -> dict:
         return {"status": "error", "fallback_text": error_msg}
 
 
-# Tool 2b: 이미지 생성 (Imagen 4 + Pillow Text Overay 활용)
-def generate_single_image2(prompt: str) -> dict:
+# Tool 2b: 이미지 생성 (Imagen 4 + Pillow Text Overay) + R2 업로드 + D1 메타데이터 저장
+def generate_single_image2(
+    prompt: str, issue_id: int, language: str | None = None
+) -> dict:
     """
     Imagen으로 배경 이미지를 생성하고, Pillow로 한글 타이틀을 완벽하게 합성합니다.
     """
@@ -380,7 +565,9 @@ def generate_single_image2(prompt: str) -> dict:
             prompt=(
                 f"A professional historical educational cartoon style illustration of: {prompt}. "
                 f"Aspect Ratio: 1:1. Square format. "
-                f"Please render the Korean text precisely and beautifully."
+                f"Please render the text in {language} precisely and beautifully within the image."
+                if language
+                else "No text rendering needed."
             ),
             config=types.GenerateImagesConfig(
                 number_of_images=1,
@@ -412,14 +599,23 @@ def generate_single_image2(prompt: str) -> dict:
         w, h = draw.textsize(title_text, font=font)
         draw.text(((W - w) / 2, H - h - 20), title_text, font=font, fill="black")
 
-        # 4. 합성된 이미지 저장
-        file_name2 = f"image2_{abs(hash(prompt))}.png"
-        file_path2 = os.path.join(download_dir, file_name2)
-        pil_image.save(file_path2)
+        # 합성된 이미지를 R2에 업로드
+        output_buffer = io.BytesIO()
+        pil_image.save(output_buffer, format="PNG")
+        file_name = f"image_{abs(hash(prompt))}.png"
+        upload_image_to_r2(file_name, output_buffer.getvalue())
+
+        # R2 Public URL 가져오기
+        final_image_url = get_image_url(
+            file_name, public_domain=os.getenv("CF_R2_PUBLIC_GEO_MASTER_URL")
+        )
+
+        # 생성된 최종 이미지 URL과 메타데이터를 D1에 저장
+        insert_cartoon_info(prompt, final_image_url, issue_id)
 
         return {
             "status": "success",
-            "file": file_name2,
+            "file": final_image_url,
             "model": f"{selected_model} + Pillow",
         }
 
@@ -433,7 +629,20 @@ def generate_single_image2(prompt: str) -> dict:
         }
 
 
-def get_elevenlabs_stt(audio_file) -> str:
+def get_image_base64(img_path):
+    """로컬 이미지를 HTML에서 띄우기 위해 Base64로 변환하거나 URL을 그대로 반환합니다."""
+    if not img_path:
+        return ""
+    if img_path.startswith("http"):  # 웹 URL인 경우 그대로 반환
+        return img_path
+    elif os.path.exists(img_path):  # 로컬 파일인 경우 Base64 인코딩
+        with open(img_path, "rb") as f:
+            data = f.read()
+        return f"data:image/jpeg;base64,{base64.b64encode(data).decode()}"
+    return ""
+
+
+def speech_to_text_with_elevenlabs(audio_file) -> str:
     """ElevenLabs API(Scribe)를 사용하여 음성을 텍스트로 변환(STT)합니다."""
     api_key = os.getenv("ELEVENLABS_API_KEY")
     if not api_key:
@@ -457,7 +666,7 @@ def get_elevenlabs_stt(audio_file) -> str:
         return None
 
 
-def get_elevenlabs_tts(text: str) -> bytes:
+def text_to_speech_with_elevenlabs(text: str) -> bytes:
     """ElevenLabs API를 사용하여 텍스트를 음성(MP3) 바이트로 변환(TTS)합니다."""
     api_key = os.getenv("ELEVENLABS_API_KEY")
     if not api_key:
@@ -485,130 +694,3 @@ def get_elevenlabs_tts(text: str) -> bytes:
         return None
     except Exception:
         return None
-
-
-# Cloudflare D1의 REST API와 통신하는 커스텀 클래스
-class CloudflareD1Saver(BaseCheckpointSaver):
-    def __init__(self):
-        super().__init__()
-        self.account_id = os.getenv("CF_ACCOUNT_ID")
-        self.d1_id = os.getenv("CF_D1_DATABASE_ID")
-        self.token = os.getenv("CF_ACCOUNT_API_TOKEN")
-        self.base_url = f"https://api.cloudflare.com/client/v4/accounts/{self.account_id}/d1/database/{self.d1_id}/query"
-        self.headers = {
-            "Authorization": f"Bearer {self.token}",
-            "Content-Type": "application/json",
-        }
-
-    def _execute_sql(self, sql: str, params: list = []):
-        """D1 REST API를 통해 SQL을 실행하는 헬퍼 함수"""
-        payload = {"sql": sql, "params": params}
-        response = requests.post(self.base_url, headers=self.headers, json=payload)
-        res_json = response.json()
-
-        # 🚨 [추가된 디버깅 코드] D1 API가 실패하면 터미널에 빨간색으로 강력하게 에러를 출력합니다!
-        if not res_json.get("success"):
-            print("\n❌ [D1 DB 에러 발생] SQL 실행 실패!")
-            print(f"오류 내용: {res_json.get('errors')}")
-            print(f"실행한 쿼리: {sql}\n")
-
-        return res_json
-
-    # --- LangGraph 필수 오버라이드 메서드 ---
-    def get_tuple(self, config: dict) -> Optional[CheckpointTuple]:
-        thread_id = config["configurable"]["thread_id"]
-        checkpoint_id = config["configurable"].get("checkpoint_id")
-
-        if checkpoint_id:
-            sql = "SELECT checkpoint, metadata FROM checkpoints WHERE thread_id = ? AND checkpoint_id = ?"
-            params = [thread_id, checkpoint_id]
-        else:
-            sql = "SELECT checkpoint, metadata FROM checkpoints WHERE thread_id = ? ORDER BY checkpoint_id DESC LIMIT 1"
-            params = [thread_id]
-
-        res = self._execute_sql(sql, params)
-
-        if res.get("success") and res["result"][0]["results"]:
-            row = res["result"][0]["results"][0]
-
-            chk_blob = base64.b64decode(row["checkpoint"])
-            meta_blob = base64.b64decode(row["metadata"])
-
-            # 1. Checkpoint 복원 (msgpack 우선 시도)
-            try:
-                chk = self.serde.loads_typed(("msgpack", chk_blob))
-            except Exception:
-                chk = self.serde.loads_typed(("json", chk_blob))
-
-            # 2. Metadata 복원 (msgpack 우선 시도)
-            try:
-                meta = self.serde.loads_typed(("msgpack", meta_blob))
-            except Exception:
-                meta = self.serde.loads_typed(("json", meta_blob))
-
-            return CheckpointTuple(config, chk, meta)
-
-        return None
-
-    def put(
-        self,
-        config: dict,
-        checkpoint: Checkpoint,
-        metadata: CheckpointMetadata,
-        new_versions: Any,
-    ) -> dict:
-        thread_id = config["configurable"]["thread_id"]
-        checkpoint_id = checkpoint["id"]
-
-        # 1. dumps_typed는 (타입, 바이트 데이터)를 반환합니다.
-        _, chk_blob = self.serde.dumps_typed(checkpoint)
-        _, meta_blob = self.serde.dumps_typed(metadata)
-
-        # 🚨 Binary(바이트) 데이터를 안전한 Base64 문자열로 인코딩
-        chk_str = base64.b64encode(chk_blob).decode("ascii")
-        meta_str = base64.b64encode(meta_blob).decode("ascii")
-
-        sql = """
-            INSERT INTO checkpoints (thread_id, checkpoint_id, checkpoint, metadata)
-            VALUES (?, ?, ?, ?)
-            ON CONFLICT(thread_id, checkpoint_id) DO UPDATE SET
-                checkpoint = excluded.checkpoint,
-                metadata = excluded.metadata
-        """
-        params = [thread_id, checkpoint_id, chk_str, meta_str]
-        self._execute_sql(sql, params)
-
-        return {
-            "configurable": {
-                "thread_id": thread_id,
-                "checkpoint_id": checkpoint_id,
-            }
-        }
-
-    def put_writes(
-        self, config: dict, writes: Sequence[Tuple[str, Any]], task_id: str
-    ) -> None:
-        thread_id = config["configurable"]["thread_id"]
-        checkpoint_id = config["configurable"]["checkpoint_id"]
-
-        for idx, (channel, value) in enumerate(writes):
-            type_, blob = self.serde.dumps_typed(value)
-
-            # 바이트를 Base64 문자열로 인코딩
-            blob_str = base64.b64encode(blob).decode("ascii")
-
-            # 🚨 중복 에러(UNIQUE constraint failed) 방지를 위한 UPSERT 구문 적용
-            sql = """
-                INSERT INTO checkpoint_writes (thread_id, checkpoint_id, task_id, idx, channel, type, blob)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(thread_id, checkpoint_id, task_id, idx) DO UPDATE SET
-                    channel = excluded.channel,
-                    type = excluded.type,
-                    blob = excluded.blob
-            """
-            params = [thread_id, checkpoint_id, task_id, idx, channel, type_, blob_str]
-            self._execute_sql(sql, params)
-
-    def list(self, config: dict, **kwargs):
-        """특정 조건의 체크포인트 목록을 반환 (에러 방지를 위해 빈 이터레이터 반환)"""
-        yield from []

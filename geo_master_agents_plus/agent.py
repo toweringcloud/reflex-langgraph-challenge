@@ -1,23 +1,34 @@
+# =====================================================================
+# 1. Python Default
+# =====================================================================
 import operator
 import re
 import uuid
 from typing import Annotated, Any, List, TypedDict
 
+# =====================================================================
+# 2. Installed Packages
+# =====================================================================
 from langchain_core.runnables import RunnableConfig
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command, Send, interrupt
 from pydantic import BaseModel, Field
-from tools import (
+
+# =====================================================================
+# 3. Custom Files
+# =====================================================================
+from services import (
     CloudflareD1Saver,
-    generate_single_image,
-    get_llm_client,
-    get_refined_issues,
-)
-from utils import (
     generate_cache_key_for_image,
     get_kv_cache,
-    insert_issue_info,
     set_kv_cache,
+    upsert_issue_info,
+)
+from tools import (
+    generate_single_image_with_fal,
+    get_country_map,
+    get_llm_client,
+    get_refined_issues,
 )
 
 
@@ -117,33 +128,31 @@ def classify_user_intent_node(state: AgentState):
 def search_historical_issues_node(state: AgentState):
     """단계 1: 주요 히스토리 검색 및 LLM을 통한 Top N 필터링"""
 
-    # 1. State에서 필요한 값 추출
+    # State에서 필요한 값 추출
     domain = state.get("domain", "economy")
     country = state.get("country")
     years = state.get("years", 10)
     top_n = 5
 
+    # 국가 정보가 없으면 다시 물어보는 메시지 반환
     if not country:
-        # 국가 정보가 없으면 다시 물어보는 메시지 반환
-        return {
-            "messages": [
-                (
-                    "assistant",
-                    "죄송합니다. 국가 정보를 찾지 못했어요. 어느 나라인지 다시 말씀해 주세요.",
-                )
-            ]
-        }
+        warn_msg = "🚨 국가 정보를 찾지 못했어요. 어느 나라인지 다시 말씀해 주세요"
+        return {"messages": [("assistant", f"{warn_msg}")]}
 
-    # 2. Tool 호출 (State 값을 인자로 전달 - 마지막 사용자 메시지에서 user_id 추출)
+    # Tool 호출 (State 값을 인자로 전달 - 마지막 사용자 메시지에서 user_id 추출)
     user_id = state.get("user_id", None)
     results = get_refined_issues(domain, country, years, top_n, user_id)
-
-    # issue 검색 결과의 데이터 유형에 따른 분기 처리
-    # if isinstance(results, list):
-    #     # gemini의 경우, 첫 번째 요소만 사용하도록 처리
-    #     if len(results) == 2 and results[1] == []:
-    #         results = results[0]
     print(f"🔍 검색된 이슈 목록: {results}")
+
+    # D1 서버에 등록하기 전, 통합 맵핑 딕셔너리를 활용해 2자리 국가 코드(alpha_2)로 변환
+    country_code = country
+    try:
+        country_map = get_country_map()
+        country_data = country_map.get(country.lower())
+        if country_data and country_data.get("alpha_2"):
+            country_code = country_data["alpha_2"]
+    except Exception:
+        pass
 
     real_issue_ids = []
     for issue_text in results:
@@ -152,17 +161,17 @@ def search_historical_issues_node(state: AgentState):
         year = int(year_match.group(1)) if year_match else 0
 
         # D1 이슈 테이블에 저장
-        inserted_id = insert_issue_info(
+        upserted_id = upsert_issue_info(
             domain=domain,
-            country=country,
+            country=country_code,
             year=year,
             content=issue_text,
             user_id=state.get("user_id"),  # 필요시 int 형변환
         )
 
         # 저장 성공 시 발급된 정수 ID 추가, 실패 시 임시 방어 코드(0) 추가
-        if inserted_id:
-            real_issue_ids.append(inserted_id)
+        if upserted_id:
+            real_issue_ids.append(upserted_id)
         else:
             print(
                 f"⚠️ 이슈 저장 실패로 인해 ID를 0으로 대체합니다: {issue_text[:10]}..."
@@ -283,7 +292,9 @@ def create_cartoon_image_node(state: ImageTaskState, config: RunnableConfig):
     # 3. 캐시 미스 시 이미지 생성
     refined_text = issue_text[3:].strip()
     # user_id = config.get("configurable", {}).get("user_id", "guest")
-    result = generate_single_image(refined_text, state.get("issue_id"))
+
+    # result = generate_single_image(refined_text, state.get("issue_id"))
+    result = generate_single_image_with_fal(refined_text, state.get("issue_id"))
     print(
         f"✅ [이미지 생성 완료] 결과({state.get('domain')}-{state.get('country')}-{state.get('year')})를 반환합니다."
     )
